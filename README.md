@@ -8,7 +8,6 @@ PyQt6-приложение для импорта музыкальных исто
 - загружать `mp3` через `yt-dlp`
 - работать с локальной библиотекой `music`
 - хранить плейлисты в `playlists`
-- импортировать публичные Spotify-плейлисты
 - редактировать метаданные и обложки `mp3`
 
 ## Структура данных
@@ -40,14 +39,6 @@ python3 app.py
 ```bash
 ./build_macos.command
 ```
-
-## Spotify
-
-Для импорта публичных Spotify-плейлистов нужны `Client ID` и `Client Secret` от Spotify Developer Dashboard.
-
-Локальные ключи и кэш не коммитятся:
-
-- `.elenveil/secrets.json`
 
 ## Публикация в GitHub
 

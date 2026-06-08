@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .models import (
     PlaylistEntry,
-    SpotifyTrack,
+    RemoteTrack,
     STATUS_DOWNLOADING,
     STATUS_META_LOADING,
     STATUS_PENDING,
@@ -77,7 +77,7 @@ def _playlist_from_dict(data: dict) -> PlaylistEntry | None:
     )
 
 
-def _track_to_dict(track: SpotifyTrack) -> dict:
+def _track_to_dict(track: RemoteTrack) -> dict:
     thumbnail = ""
     if track.thumbnail_data:
         thumbnail = base64.b64encode(track.thumbnail_data).decode("ascii")
@@ -85,7 +85,7 @@ def _track_to_dict(track: SpotifyTrack) -> dict:
         "title": track.title,
         "artists": track.artists,
         "album": track.album,
-        "spotify_url": track.spotify_url,
+        "source_url": track.source_url,
         "thumbnail_data": thumbnail,
         "status": track.status,
         "progress": track.progress,
@@ -94,7 +94,7 @@ def _track_to_dict(track: SpotifyTrack) -> dict:
     }
 
 
-def _track_from_dict(data: dict) -> SpotifyTrack | None:
+def _track_from_dict(data: dict) -> RemoteTrack | None:
     if not isinstance(data, dict):
         return None
 
@@ -110,11 +110,11 @@ def _track_from_dict(data: dict) -> SpotifyTrack | None:
     if status in (STATUS_DOWNLOADING, STATUS_META_LOADING):
         status = STATUS_PENDING
 
-    return SpotifyTrack(
+    return RemoteTrack(
         title=str(data.get("title") or "Без названия").strip(),
         artists=str(data.get("artists") or "Неизвестный автор").strip(),
         album=str(data.get("album") or "").strip(),
-        spotify_url=str(data.get("spotify_url") or "").strip(),
+        source_url=str(data.get("source_url") or "").strip(),
         thumbnail_data=thumbnail_data,
         status=status,
         progress=float(data.get("progress") or 0.0),

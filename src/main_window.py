@@ -1,13 +1,16 @@
 import os
 import shutil
 import subprocess
+import urllib.request
 
+import yt_dlp
 from PyQt6.QtCore import QEvent, QSize, Qt, QThread, QTimer, QUrl
 from PyQt6.QtGui import QDesktopServices, QIcon, QPalette
 from PyQt6.QtWidgets import (
+    QApplication,
     QCheckBox,
-    QDialogButtonBox,
     QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -18,7 +21,9 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QMenu,
     QPushButton,
+    QProgressBar,
     QScrollArea,
     QSplitter,
     QStackedWidget,
@@ -26,37 +31,52 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .dialogs import ExperimentalImportDialog, MetadataDialog, SpotifyCredentialsDialog
+from .dialogs import ExperimentalImportDialog, MetadataDialog
 from .library_scanner import load_music_track, scan_music_directory
 from .manual_playlist import (
+    append_tracks_to_manual_playlist,
     create_manual_playlist,
+    export_playlist_m3u8,
     load_manual_playlist,
     load_manual_playlists,
     remove_track_from_manual_playlist,
+    rewrite_track_references_in_playlists,
+    sanitize_playlist_filename,
 )
 from .metadata_editor import apply_mp3_metadata
+from .music_paths import (
+    build_music_file_path,
+    build_music_output_template,
+    ensure_unique_music_file_path,
+)
 from .models import (
-    LocalMusicTrack,
-    PlaylistEntry,
-    SpotifyTrack,
-    STATUS_DOWNLOADING,
     STATUS_DONE,
+    STATUS_DOWNLOADING,
     STATUS_ERROR,
     STATUS_META_LOADING,
     STATUS_PENDING,
     STATUS_SKIPPED,
     DownloadTask,
+    LocalMusicTrack,
+    PlaylistEntry,
+    RemoteTrack,
 )
 from .paths import resource_path
 from .playlist_storage import delete_playlist, load_playlists, save_playlist
-from .settings import (
-    load_elenveil_root_dir,
-    load_spotify_credentials,
-    save_elenveil_root_dir,
-    save_spotify_credentials,
+from .settings import load_elenveil_root_dir, save_elenveil_root_dir
+from .widgets import (
+    AddCard,
+    DownloadCard,
+    PlaylistListItemWidget,
+    RemoteTrackCard,
+    ToggleSwitch,
 )
-from .widgets import AddCard, DownloadCard, PlaylistListItemWidget, SpotifyTrackCard, ToggleSwitch
-from .workers import DownloadWorker, MetadataWorker, SpotDLDownloadWorker, SpotifyPlaylistWorker
+from .workers import (
+    DownloadWorker,
+    MetadataWorker,
+    YouTubePlaylistDownloadWorker,
+    YouTubePlaylistWorker,
+)
 
 
 class MainWindow(QMainWindow):
@@ -69,7 +89,7 @@ class MainWindow(QMainWindow):
         self.cards: list[DownloadCard] = []
         self.playlists: list[PlaylistEntry] = []
         self.local_music_tracks: list[LocalMusicTrack] = []
-        self.spotify_track_cards: list[SpotifyTrackCard] = []
+        self.remote_track_cards: list[RemoteTrackCard] = []
         self.playlist_item_widgets: list[PlaylistListItemWidget] = []
         self.output_dir = ""
         self.ffmpeg_location = ""
@@ -80,44 +100,52 @@ class MainWindow(QMainWindow):
         self.select_root_icon = QIcon()
         self.open_folder_icon = QIcon()
         self.add_playlist_icon = QIcon()
+        self.new_track_icon = QIcon()
         self.import_icon = QIcon()
         self.start_icon = QIcon()
+        self.sort_date_icon = QIcon()
+        self.sort_title_icon = QIcon()
         self.status_icons: dict[str, QIcon] = {}
-        self.spotify_credentials = load_spotify_credentials()
         self.reload_theme_icons()
 
         self.metadata_thread: QThread | None = None
         self.metadata_worker: MetadataWorker | None = None
         self.download_thread: QThread | None = None
         self.download_worker: DownloadWorker | None = None
-        self.spotify_thread: QThread | None = None
-        self.spotify_worker: SpotifyPlaylistWorker | None = None
-        self.spotify_download_thread: QThread | None = None
-        self.spotify_download_worker: SpotDLDownloadWorker | None = None
+        self.youtube_thread: QThread | None = None
+        self.youtube_worker: YouTubePlaylistWorker | None = None
+        self.youtube_download_thread: QThread | None = None
+        self.youtube_download_worker: YouTubePlaylistDownloadWorker | None = None
         self.pending_playlist_index: int | None = None
-        self.active_spotify_playlist_index: int | None = None
+        self.active_remote_playlist_index: int | None = None
         self.active_download_index: int | None = None
         self.selected_task_index: int | None = None
         self.selected_experimental_track_index: int | None = None
+        self.selected_experimental_track_indexes: set[int] = set()
+        self.experimental_selection_anchor_index: int | None = None
         self.selected_playlist_index: int | None = None
         self.experimental_source_mode = "none"
         self.sort_field = "date"
         self.sort_ascending = False
         self.animation_phase = False
-        default_elenveil_root_dir = os.path.join(os.path.expanduser("~"), "Music", "Elenveil")
+        default_elenveil_root_dir = os.path.join(
+            os.path.expanduser("~"), "Music", "Elenveil"
+        )
         self.elenveil_root_dir = ""
         self.music_library_dir = ""
         self.playlists_dir = ""
-        self.set_elenveil_root_dir(load_elenveil_root_dir() or default_elenveil_root_dir, persist=False)
+        self.set_elenveil_root_dir(
+            load_elenveil_root_dir() or default_elenveil_root_dir, persist=False
+        )
 
         root = QWidget()
         layout = QVBoxLayout(root)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
 
-        top = QHBoxLayout()
-        top.setContentsMargins(0, 0, 0, 0)
-        top.setSpacing(8)
+        self.top_layout = QHBoxLayout()
+        self.top_layout.setContentsMargins(0, 0, 0, 0)
+        self.top_layout.setSpacing(8)
 
         self.select_elenveil_root_button = QPushButton()
         self.select_elenveil_root_button.setToolTip("Выбрать папку Elenveil")
@@ -128,7 +156,9 @@ class MainWindow(QMainWindow):
             "QPushButton:hover { background:#373b43; }"
             "QPushButton:disabled { background:#2a2d33; border-color:#353941; }"
         )
-        self.select_elenveil_root_button.clicked.connect(self.choose_elenveil_root_directory)
+        self.select_elenveil_root_button.clicked.connect(
+            self.choose_elenveil_root_directory
+        )
         self.open_music_folder_button = QPushButton()
         self.open_music_folder_button.setToolTip("Открыть папку Elenveil")
         self.open_music_folder_button.setAccessibleName("Открыть папку Elenveil")
@@ -160,6 +190,16 @@ class MainWindow(QMainWindow):
             "QPushButton:disabled { background:#2a2d33; border-color:#353941; }"
         )
         self.import_button.clicked.connect(self.import_links)
+        self.new_track_button = QPushButton()
+        self.new_track_button.setToolTip("Новый трек")
+        self.new_track_button.setAccessibleName("Новый трек")
+        self.new_track_button.setFixedSize(36, 36)
+        self.new_track_button.setStyleSheet(
+            "QPushButton { background:#2e3136; border:1px solid #3b3f46; border-radius:8px; }"
+            "QPushButton:hover { background:#373b43; }"
+            "QPushButton:disabled { background:#2a2d33; border-color:#353941; }"
+        )
+        self.new_track_button.clicked.connect(self.add_new_track_for_experimental_mode)
         self.start_button = QPushButton()
         self.start_button.setToolTip("Старт")
         self.start_button.setAccessibleName("Старт")
@@ -184,14 +224,12 @@ class MainWindow(QMainWindow):
         experimental_layout.setSpacing(6)
         experimental_layout.addWidget(self.experimental_mode_label)
         experimental_layout.addWidget(self.experimental_mode_toggle)
+        self.experimental_mode_controls_widget = QWidget()
+        self.experimental_mode_controls_widget.setLayout(experimental_layout)
 
         self.ffmpeg_status_label = QLabel("FFmpeg: проверка...")
         self.ffmpeg_status_label.setStyleSheet("color:#b4bcc9; font-size:12px;")
-        top.addStretch(1)
-        top.addLayout(experimental_layout)
-        top.addSpacing(12)
-        top.addWidget(self.ffmpeg_status_label)
-        layout.addLayout(top)
+        layout.addLayout(self.top_layout)
 
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
@@ -215,12 +253,24 @@ class MainWindow(QMainWindow):
         experimental_page_layout = QVBoxLayout(self.experimental_page)
         experimental_page_layout.setContentsMargins(0, 0, 0, 0)
         experimental_page_layout.setSpacing(8)
+        self.experimental_footer_widget = QWidget()
+        self.experimental_footer_widget.setFixedHeight(22)
+        self.experimental_footer_layout = QHBoxLayout()
+        self.experimental_footer_layout.setContentsMargins(8, 0, 8, 0)
+        self.experimental_footer_layout.setSpacing(8)
+        self.experimental_footer_widget.setLayout(self.experimental_footer_layout)
+        self.experimental_footer_left_spacer = QWidget()
+        self.experimental_footer_left_spacer.setFixedHeight(1)
 
         self.sort_date_button = self.create_text_header_button("")
         self.sort_title_button = self.create_text_header_button("")
         self.sort_date_button.clicked.connect(lambda: self.on_sort_requested("date"))
         self.sort_title_button.clicked.connect(lambda: self.on_sort_requested("title"))
         self.update_sort_button_labels()
+        self.sort_date_button.setIcon(self.sort_date_icon)
+        self.sort_date_button.setIconSize(QSize(18, 18))
+        self.sort_title_button.setIcon(self.sort_title_icon)
+        self.sort_title_button.setIconSize(QSize(18, 18))
         self.delete_files_checkbox = QCheckBox("Удалять файлы")
         self.delete_files_checkbox.setChecked(False)
         self.delete_files_checkbox.setVisible(False)
@@ -257,6 +307,7 @@ class MainWindow(QMainWindow):
         self.tracks_panel, tracks_layout = self.create_section_panel(
             "Треки",
             [
+                self.new_track_button,
                 self.import_button,
                 self.start_button,
             ],
@@ -266,22 +317,22 @@ class MainWindow(QMainWindow):
                 self.sort_title_button,
             ],
         )
-        self.spotify_tracks_scroll = QScrollArea()
-        self.spotify_tracks_scroll.setWidgetResizable(True)
-        self.spotify_tracks_container = QWidget()
-        self.spotify_tracks_layout = QVBoxLayout(self.spotify_tracks_container)
-        self.spotify_tracks_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.spotify_tracks_layout.setContentsMargins(4, 4, 4, 4)
-        self.spotify_tracks_layout.setSpacing(8)
-        self.spotify_tracks_empty = QLabel("Плейлист не выбран")
-        self.spotify_tracks_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.spotify_tracks_empty.setStyleSheet(
+        self.playlist_tracks_scroll = QScrollArea()
+        self.playlist_tracks_scroll.setWidgetResizable(True)
+        self.playlist_tracks_container = QWidget()
+        self.playlist_tracks_layout = QVBoxLayout(self.playlist_tracks_container)
+        self.playlist_tracks_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.playlist_tracks_layout.setContentsMargins(4, 4, 4, 4)
+        self.playlist_tracks_layout.setSpacing(8)
+        self.playlist_tracks_empty = QLabel("Плейлист не выбран")
+        self.playlist_tracks_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.playlist_tracks_empty.setStyleSheet(
             "font-size:14px; color:#8f98a6; padding:24px; background:transparent; border:none;"
         )
-        self.spotify_tracks_layout.addWidget(self.spotify_tracks_empty)
-        self.spotify_tracks_layout.addStretch(1)
-        self.spotify_tracks_scroll.setWidget(self.spotify_tracks_container)
-        tracks_layout.addWidget(self.spotify_tracks_scroll)
+        self.playlist_tracks_layout.addWidget(self.playlist_tracks_empty)
+        self.playlist_tracks_layout.addStretch(1)
+        self.playlist_tracks_scroll.setWidget(self.playlist_tracks_container)
+        tracks_layout.addWidget(self.playlist_tracks_scroll)
 
         self.metadata_panel, metadata_layout = self.create_section_panel("Метаданные")
         self.metadata_values: dict[str, QLabel] = {}
@@ -306,6 +357,7 @@ class MainWindow(QMainWindow):
         self.experimental_splitter.setSizes([220, 620, 280])
 
         experimental_page_layout.addWidget(self.experimental_splitter)
+        experimental_page_layout.addWidget(self.experimental_footer_widget)
         self.content_stack.addWidget(self.normal_page)
         self.content_stack.addWidget(self.experimental_page)
         layout.addWidget(self.content_stack)
@@ -314,6 +366,7 @@ class MainWindow(QMainWindow):
         self.relocate_track_view(self.normal_page_layout)
         self.playlist_list.currentRowChanged.connect(self.on_playlist_selected)
         self.restore_persisted_playlists()
+        self.relayout_status_widgets(False)
         self.update_metadata_panel()
         self.apply_mode_state(False)
 
@@ -396,8 +449,10 @@ class MainWindow(QMainWindow):
     def update_sort_button_labels(self) -> None:
         date_arrow = "↑" if self.sort_field == "date" and self.sort_ascending else "↓"
         title_arrow = "↑" if self.sort_field == "title" and self.sort_ascending else "↓"
-        self.sort_date_button.setText(f"По дате {date_arrow}")
-        self.sort_title_button.setText(f"По названию {title_arrow}")
+        self.sort_date_button.setText(date_arrow)
+        self.sort_title_button.setText(title_arrow)
+        self.sort_date_button.setToolTip("Сортировка по номеру")
+        self.sort_title_button.setToolTip("Сортировка по названию")
         self.sort_date_button.setChecked(self.sort_field == "date")
         self.sort_title_button.setChecked(self.sort_field == "title")
 
@@ -409,28 +464,42 @@ class MainWindow(QMainWindow):
             self.sort_ascending = field == "title"
         self.update_sort_button_labels()
         if self.experimental_source_mode == "all_music":
-            self.render_experimental_tracks(self.get_sorted_experimental_tracks(self.local_music_tracks))
-        elif self.experimental_source_mode == "playlist" and self.selected_playlist_index is not None:
+            self.render_experimental_tracks(
+                self.get_sorted_experimental_tracks(self.local_music_tracks)
+            )
+        elif (
+            self.experimental_source_mode == "playlist"
+            and self.selected_playlist_index is not None
+        ):
             playlist = self.playlists[self.selected_playlist_index]
-            self.render_experimental_tracks(self.get_sorted_experimental_tracks(playlist.tracks))
+            self.render_experimental_tracks(
+                self.get_sorted_experimental_tracks(playlist.tracks)
+            )
 
     def get_sorted_experimental_tracks(
         self,
-        tracks: list[SpotifyTrack] | list[LocalMusicTrack],
-    ) -> list[SpotifyTrack] | list[LocalMusicTrack]:
+        tracks: list[RemoteTrack] | list[LocalMusicTrack],
+    ) -> list[RemoteTrack] | list[LocalMusicTrack]:
+        if self.sort_field == "date" and self.experimental_source_mode == "playlist":
+            return list(tracks) if self.sort_ascending else list(reversed(tracks))
+
         indexed_tracks = list(enumerate(tracks))
 
-        def sort_key(item: tuple[int, SpotifyTrack | LocalMusicTrack]) -> tuple:
+        def sort_key(item: tuple[int, RemoteTrack | LocalMusicTrack]) -> tuple:
             index, track = item
             if self.sort_field == "title":
                 return (track.title.casefold(), index)
             added_at = getattr(track, "added_at", 0.0)
             return (added_at, index)
 
-        sorted_items = sorted(indexed_tracks, key=sort_key, reverse=not self.sort_ascending)
+        sorted_items = sorted(
+            indexed_tracks, key=sort_key, reverse=not self.sort_ascending
+        )
         return [track for _, track in sorted_items]
 
-    def get_track_status_title(self, track: SpotifyTrack | LocalMusicTrack | None) -> str:
+    def get_track_status_title(
+        self, track: RemoteTrack | LocalMusicTrack | None
+    ) -> str:
         if track is None:
             return "—"
         if isinstance(track, LocalMusicTrack):
@@ -442,52 +511,68 @@ class MainWindow(QMainWindow):
         status_titles = {
             STATUS_META_LOADING: "Подгрузка метаданных",
             STATUS_PENDING: "Ожидает загрузки",
-            STATUS_DOWNLOADING: "Загружается через spotdl",
+            STATUS_DOWNLOADING: "Загружается",
             STATUS_DONE: "Загружен",
-            STATUS_ERROR: f"Ошибка: {track.error}" if getattr(track, "error", "") else "Ошибка загрузки",
+            STATUS_ERROR: f"Ошибка: {track.error}"
+            if getattr(track, "error", "")
+            else "Ошибка загрузки",
             STATUS_SKIPPED: (
                 f"Пропущен: {track.error}"
                 if getattr(track, "error", "")
-                else "Пропущен: spotdl не нашёл источник"
+                else "Пропущен"
             ),
         }
-        return status_titles.get(getattr(track, "status", STATUS_PENDING), "Ожидает загрузки")
+        return status_titles.get(
+            getattr(track, "status", STATUS_PENDING), "Ожидает загрузки"
+        )
 
     def refresh_experimental_source_view(self) -> None:
         if not self.experimental_mode_toggle.isChecked():
             return
         if self.experimental_source_mode == "all_music":
             tracks = self.get_sorted_experimental_tracks(self.local_music_tracks)
-            if tracks and (self.selected_experimental_track_index is None or self.selected_experimental_track_index >= len(tracks)):
+            if tracks and (
+                self.selected_experimental_track_index is None
+                or self.selected_experimental_track_index >= len(tracks)
+            ):
                 self.selected_experimental_track_index = 0
             self.render_experimental_tracks(tracks)
             self.update_metadata_panel()
             return
-        if self.experimental_source_mode == "playlist" and self.selected_playlist_index is not None:
+        if (
+            self.experimental_source_mode == "playlist"
+            and self.selected_playlist_index is not None
+        ):
             playlist = self.playlists[self.selected_playlist_index]
             tracks = self.get_sorted_experimental_tracks(playlist.tracks)
-            if tracks and (self.selected_experimental_track_index is None or self.selected_experimental_track_index >= len(tracks)):
+            if tracks and (
+                self.selected_experimental_track_index is None
+                or self.selected_experimental_track_index >= len(tracks)
+            ):
                 self.selected_experimental_track_index = 0
             self.render_experimental_tracks(tracks)
             self.update_metadata_panel()
 
     def update_delete_files_checkbox_visibility(self) -> None:
-        visible = self.experimental_mode_toggle.isChecked() and self.experimental_source_mode == "playlist"
+        visible = (
+            self.experimental_mode_toggle.isChecked()
+            and self.experimental_source_mode == "playlist"
+        )
         self.delete_files_checkbox.setVisible(visible)
 
     def update_start_button_state(self) -> None:
         if self.experimental_mode_toggle.isChecked():
             enabled = False
             if (
-                self.spotify_download_thread is None
-                and self.spotify_thread is None
+                self.youtube_download_thread is None
+                and self.youtube_thread is None
                 and self.experimental_source_mode == "playlist"
                 and self.selected_playlist_index is not None
                 and 0 <= self.selected_playlist_index < len(self.playlists)
             ):
                 playlist = self.playlists[self.selected_playlist_index]
                 enabled = (
-                    playlist.source == "spotify"
+                    playlist.source == "youtube"
                     and not playlist.is_loading
                     and any(
                         track.status in (STATUS_PENDING, STATUS_ERROR, STATUS_SKIPPED)
@@ -497,16 +582,115 @@ class MainWindow(QMainWindow):
             self.start_button.setEnabled(enabled)
             return
 
-        self.start_button.setEnabled(any(task.status == STATUS_PENDING for task in self.tasks))
+        self.start_button.setEnabled(
+            any(task.status == STATUS_PENDING for task in self.tasks)
+        )
 
     def refresh_local_music_tracks(self) -> None:
         self.ensure_elenveil_directories()
         self.local_music_tracks = scan_music_directory(self.music_library_dir)
+        self.sync_remote_playlists_with_library()
+
+    def normalize_track_text(self, value: str) -> str:
+        return " ".join(str(value or "").strip().casefold().split())
+
+    def remote_track_matches_local(
+        self, remote_track: RemoteTrack, local_track: LocalMusicTrack
+    ) -> bool:
+        if self.normalize_track_text(remote_track.title) != self.normalize_track_text(
+            local_track.title
+        ):
+            return False
+        if self.normalize_track_text(remote_track.artists) != self.normalize_track_text(
+            local_track.artists
+        ):
+            return False
+
+        remote_album = self.normalize_track_text(remote_track.album)
+        local_album = self.normalize_track_text(local_track.album)
+        if remote_album and local_album and remote_album != local_album:
+            return False
+        return True
+
+    def sync_remote_playlist_with_library(
+        self, playlist: PlaylistEntry, persist: bool = True
+    ) -> bool:
+        if playlist.source != "youtube":
+            return False
+
+        local_tracks_by_title: dict[str, list[LocalMusicTrack]] = {}
+        for local_track in self.local_music_tracks:
+            title_key = self.normalize_track_text(local_track.title)
+            if not title_key:
+                continue
+            local_tracks_by_title.setdefault(title_key, []).append(local_track)
+
+        changed = False
+        for track in playlist.tracks:
+            title_key = self.normalize_track_text(track.title)
+            candidates = local_tracks_by_title.get(title_key, [])
+            matched_track = next(
+                (
+                    local_track
+                    for local_track in candidates
+                    if self.remote_track_matches_local(track, local_track)
+                ),
+                None,
+            )
+            if matched_track is not None:
+                if (
+                    track.status != STATUS_DONE
+                    or track.local_file_path != matched_track.file_path
+                    or track.progress != 100.0
+                    or track.error
+                ):
+                    track.status = STATUS_DONE
+                    track.local_file_path = matched_track.file_path
+                    track.progress = 100.0
+                    track.error = ""
+                    changed = True
+                continue
+
+            if track.status == STATUS_DONE and (
+                not track.local_file_path or not os.path.exists(track.local_file_path)
+            ):
+                track.status = STATUS_PENDING
+                track.local_file_path = ""
+                track.progress = 0.0
+                track.error = ""
+                changed = True
+
+        if changed and persist:
+            playlist_index = self.playlists.index(playlist) if playlist in self.playlists else -1
+            if playlist_index >= 0:
+                self.persist_playlist(playlist_index)
+
+        playlist_m3u8_path = os.path.join(
+            self.playlists_dir, f"{sanitize_playlist_filename(playlist.name)}.m3u8"
+        )
+        if any(track.status == STATUS_DONE for track in playlist.tracks) and (
+            changed or not os.path.exists(playlist_m3u8_path)
+        ):
+            try:
+                self.export_remote_playlist_m3u8(playlist)
+            except Exception:
+                pass
+        return changed
+
+    def sync_remote_playlists_with_library(self) -> None:
+        for index, playlist in enumerate(self.playlists):
+            if playlist.source != "youtube":
+                continue
+            changed = self.sync_remote_playlist_with_library(playlist, persist=False)
+            if changed:
+                self.persist_playlist(index)
+            if index < len(self.playlist_item_widgets):
+                self.update_playlist_item_status(index)
 
     def show_all_music(self) -> None:
         self.experimental_source_mode = "all_music"
         self.selected_playlist_index = None
-        self.selected_experimental_track_index = None
+        self.clear_experimental_track_selection()
         self.all_music_button.setChecked(True)
         self.playlist_list.blockSignals(True)
         self.playlist_list.setCurrentRow(-1)
@@ -515,7 +699,10 @@ class MainWindow(QMainWindow):
             widget.set_selected(False)
         self.refresh_local_music_tracks()
         tracks = self.get_sorted_experimental_tracks(self.local_music_tracks)
-        self.selected_experimental_track_index = 0 if tracks else None
+        if tracks:
+            self.selected_experimental_track_index = 0
+            self.selected_experimental_track_indexes = {0}
+            self.experimental_selection_anchor_index = 0
         self.render_experimental_tracks(tracks)
         self.update_metadata_panel()
         self.update_delete_files_checkbox_visibility()
@@ -525,6 +712,8 @@ class MainWindow(QMainWindow):
         self.select_elenveil_root_button.setVisible(is_experimental)
         self.open_music_folder_button.setVisible(is_experimental)
         self.create_playlist_button.setVisible(is_experimental)
+        self.experimental_footer_widget.setVisible(is_experimental)
+        self.relayout_status_widgets(is_experimental)
         if is_experimental:
             self.content_stack.setCurrentWidget(self.experimental_page)
             self.resize(max(self.width(), 1180), max(self.height(), 720))
@@ -535,6 +724,41 @@ class MainWindow(QMainWindow):
         self.update_metadata_panel()
         self.update_delete_files_checkbox_visibility()
         self.update_start_button_state()
+
+    def relayout_status_widgets(self, is_experimental: bool) -> None:
+        self.clear_layout(self.top_layout)
+        self.clear_layout(self.experimental_footer_layout)
+        if is_experimental:
+            self.experimental_footer_left_spacer.setFixedWidth(
+                self.experimental_mode_controls_widget.sizeHint().width()
+            )
+            self.experimental_footer_layout.addWidget(
+                self.experimental_footer_left_spacer
+            )
+            self.experimental_footer_layout.addStretch(1)
+            self.experimental_footer_layout.addWidget(
+                self.ffmpeg_status_label,
+                0,
+                Qt.AlignmentFlag.AlignCenter,
+            )
+            self.experimental_footer_layout.addStretch(1)
+            self.experimental_footer_layout.addWidget(
+                self.experimental_mode_controls_widget,
+                0,
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            )
+            return
+        self.top_layout.addStretch(1)
+        self.top_layout.addWidget(self.experimental_mode_controls_widget)
+        self.top_layout.addSpacing(12)
+        self.top_layout.addWidget(self.ffmpeg_status_label)
+
+    def clear_layout(self, layout: QHBoxLayout | QVBoxLayout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
 
     def on_experimental_mode_toggled(self, checked: bool) -> None:
         self.apply_mode_state(checked)
@@ -560,8 +784,8 @@ class MainWindow(QMainWindow):
             for worker in (
                 self.metadata_thread,
                 self.download_thread,
-                self.spotify_thread,
-                self.spotify_download_thread,
+                self.youtube_thread,
+                self.youtube_download_thread,
             )
         ):
             QMessageBox.information(
@@ -603,11 +827,15 @@ class MainWindow(QMainWindow):
     def restore_persisted_playlists(self) -> None:
         self.ensure_elenveil_directories()
         persisted = load_playlists(self.playlists_dir)
-        persisted.extend(load_manual_playlists(self.playlists_dir, self.music_library_dir))
+        persisted = [playlist for playlist in persisted if playlist.source == "youtube"]
+        persisted.extend(
+            load_manual_playlists(self.playlists_dir, self.music_library_dir)
+        )
         if not persisted:
             return
         self.playlists = list(persisted)
         self.rebuild_playlist_list()
+        self.sync_remote_playlists_with_library()
 
     def rebuild_playlist_list(self) -> None:
         self.playlist_item_widgets = []
@@ -619,9 +847,24 @@ class MainWindow(QMainWindow):
         if not (0 <= playlist_index < len(self.playlists)):
             return
         playlist = self.playlists[playlist_index]
-        if playlist.source != "spotify" or playlist.is_loading:
+        if playlist.source != "youtube" or playlist.is_loading:
             return
         save_playlist(playlist, self.playlists_dir)
+
+    def export_remote_playlist_m3u8(self, playlist: PlaylistEntry) -> None:
+        if playlist.source != "youtube":
+            return
+        track_paths: list[str] = []
+        for track in playlist.tracks:
+            track_path = str(getattr(track, "local_file_path", "") or "").strip()
+            if track_path:
+                track_paths.append(track_path)
+        export_playlist_m3u8(
+            self.playlists_dir,
+            self.music_library_dir,
+            playlist.name,
+            track_paths,
+        )
 
     def add_playlist_list_item(self, playlist: PlaylistEntry) -> int:
         item = QListWidgetItem()
@@ -635,10 +878,29 @@ class MainWindow(QMainWindow):
         widget.set_loading(playlist.is_loading or playlist.is_downloading)
         row = self.playlist_list.count() - 1
         widget.clicked.connect(lambda row=row: self.playlist_list.setCurrentRow(row))
-        widget.delete_requested.connect(lambda row=row: self.on_playlist_delete_requested(row))
+        widget.delete_requested.connect(
+            lambda row=row: self.on_playlist_delete_requested(row)
+        )
         self.playlist_item_widgets.append(widget)
         self.playlist_list.setItemWidget(item, widget)
+        self.update_playlist_item_status(row)
         return row
+
+    def get_playlist_ready_status_icon(self, playlist: PlaylistEntry) -> QIcon:
+        if playlist.tracks and all(
+            getattr(track, "status", STATUS_PENDING) == STATUS_DONE
+            for track in playlist.tracks
+        ):
+            return self.status_icons[STATUS_DONE]
+        return self.playlist_ready_icon
+
+    def update_playlist_item_status(self, row: int) -> None:
+        if not (0 <= row < len(self.playlists)) or row >= len(self.playlist_item_widgets):
+            return
+        playlist = self.playlists[row]
+        widget = self.playlist_item_widgets[row]
+        widget.set_ready_icon(self.get_playlist_ready_status_icon(playlist))
+        widget.set_loading(playlist.is_loading or playlist.is_downloading)
 
     def on_playlist_delete_requested(self, row: int) -> None:
         if not (0 <= row < len(self.playlists)):
@@ -658,7 +920,7 @@ class MainWindow(QMainWindow):
             playlist_path = playlist.source_url.strip()
             if playlist_path and os.path.exists(playlist_path):
                 os.remove(playlist_path)
-        elif playlist.source == "spotify":
+        elif playlist.source == "youtube":
             delete_playlist(playlist, self.playlists_dir)
 
         self.playlists.pop(row)
@@ -689,11 +951,27 @@ class MainWindow(QMainWindow):
         root.addWidget(title)
 
         buttons_row = QHBoxLayout()
-        manual_button = self.create_text_header_button("Ручной")
-        spotify_button = self.create_text_header_button("Spotify")
-        youtube_button = self.create_text_header_button("Youtube")
+
+        def create_source_button(icon: QIcon, tooltip: str) -> QPushButton:
+            button = QPushButton()
+            button.setToolTip(tooltip)
+            button.setAccessibleName(tooltip)
+            button.setFixedSize(52, 52)
+            button.setStyleSheet(
+                "QPushButton { background:#2e3136; border:1px solid #3b3f46; border-radius:10px; }"
+                "QPushButton:hover { background:#373b43; }"
+                "QPushButton:pressed { background:#2a2d33; }"
+            )
+            button.setIcon(icon)
+            button.setIconSize(QSize(24, 24))
+            return button
+
+        manual_button = create_source_button(self.add_playlist_icon, "Ручной")
+        youtube_button = create_source_button(
+            QIcon(resource_path("assets", "icons", "youtube.svg")),
+            "Youtube",
+        )
         buttons_row.addWidget(manual_button)
-        buttons_row.addWidget(spotify_button)
         buttons_row.addWidget(youtube_button)
         root.addLayout(buttons_row)
 
@@ -708,20 +986,17 @@ class MainWindow(QMainWindow):
             dialog.accept()
 
         manual_button.clicked.connect(lambda: choose("manual"))
-        spotify_button.clicked.connect(lambda: choose("spotify"))
         youtube_button.clicked.connect(lambda: choose("youtube"))
 
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
-        if selection["value"] == "spotify":
-            self.add_spotify_playlist()
-            return
         if selection["value"] == "manual":
             self.add_manual_playlist()
             return
         if selection["value"] == "youtube":
-            QMessageBox.information(self, "Скоро будет", "Импорт плейлиста Youtube пока не реализован.")
+            self.add_youtube_playlist()
+            return
 
     def add_manual_playlist(self) -> None:
         dialog = QInputDialog(self)
@@ -738,14 +1013,17 @@ class MainWindow(QMainWindow):
             (
                 index
                 for index, playlist in enumerate(self.playlists)
-                if playlist.source == "manual" and playlist.name.casefold() == playlist_name.casefold()
+                if playlist.source == "manual"
+                and playlist.name.casefold() == playlist_name.casefold()
             ),
             None,
         )
         if existing_index is not None:
             self.playlist_list.setCurrentRow(existing_index)
             self.on_playlist_selected(existing_index)
-            QMessageBox.information(self, "Плейлист", "Плейлист с таким названием уже существует.")
+            QMessageBox.information(
+                self, "Плейлист", "Плейлист с таким названием уже существует."
+            )
             return
 
         try:
@@ -762,16 +1040,18 @@ class MainWindow(QMainWindow):
         self.playlist_list.setCurrentRow(row)
         self.on_playlist_selected(row)
 
-    def add_spotify_playlist(self) -> None:
-        if self.spotify_thread is not None:
-            QMessageBox.information(self, "Spotify", "Подождите завершения текущего импорта плейлиста.")
-            return
-        if not self.ensure_spotify_credentials():
+    def add_youtube_playlist(self) -> None:
+        if self.youtube_thread is not None:
+            QMessageBox.information(
+                self,
+                "YouTube",
+                "Подождите завершения текущего импорта плейлиста.",
+            )
             return
 
         dialog = QInputDialog(self)
-        dialog.setWindowTitle("Spotify плейлист")
-        dialog.setLabelText("Вставьте ссылку на Spotify плейлист:")
+        dialog.setWindowTitle("YouTube плейлист")
+        dialog.setLabelText("Вставьте ссылку на YouTube плейлист:")
         dialog.setTextEchoMode(QLineEdit.EchoMode.Normal)
         dialog.resize(760, dialog.sizeHint().height())
         dialog.setMinimumWidth(760)
@@ -784,80 +1064,68 @@ class MainWindow(QMainWindow):
             (
                 index
                 for index, playlist in enumerate(self.playlists)
-                if playlist.source == "spotify" and playlist.source_url.strip() == playlist_url
+                if playlist.source == "youtube"
+                and playlist.source_url.strip() == playlist_url
             ),
             None,
         )
         if existing_index is not None:
             self.playlist_list.setCurrentRow(existing_index)
             self.on_playlist_selected(existing_index)
-            QMessageBox.information(self, "Spotify", "Этот плейлист уже импортирован и восстановлен из локального кэша.")
+            QMessageBox.information(
+                self,
+                "YouTube",
+                "Этот плейлист уже импортирован и восстановлен из локального кэша.",
+            )
             return
 
         self.create_playlist_button.setEnabled(False)
-        self.pending_playlist_index = self.add_loading_playlist_entry(playlist_url)
-        self.start_spotify_playlist_import(playlist_url)
-
-    def ensure_spotify_credentials(self) -> bool:
-        client_id = self.spotify_credentials.get("client_id", "").strip()
-        client_secret = self.spotify_credentials.get("client_secret", "").strip()
-        if client_id and client_secret:
-            return True
-
-        dialog = SpotifyCredentialsDialog(self, client_id, client_secret)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return False
-
-        client_id, client_secret = dialog.get_values()
-        if not client_id or not client_secret:
-            QMessageBox.warning(
-                self,
-                "Spotify",
-                "Client ID и Client Secret не могут быть пустыми.",
-            )
-            return False
-
-        self.spotify_credentials = {
-            "client_id": client_id,
-            "client_secret": client_secret,
-        }
-        save_spotify_credentials(client_id, client_secret)
-        return True
-
-    def start_spotify_playlist_import(self, playlist_url: str) -> None:
-        worker = SpotifyPlaylistWorker(
+        self.pending_playlist_index = self.add_loading_playlist_entry(
             playlist_url,
-            self.spotify_credentials.get("client_id", ""),
-            self.spotify_credentials.get("client_secret", ""),
+            "youtube",
         )
+        self.start_youtube_playlist_import(playlist_url)
+
+    def start_youtube_playlist_import(self, playlist_url: str) -> None:
+        worker = YouTubePlaylistWorker(playlist_url)
         thread = QThread(self)
-        self.spotify_worker = worker
-        self.spotify_thread = thread
+        self.youtube_worker = worker
+        self.youtube_thread = thread
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.playlist_ready.connect(self.on_spotify_playlist_ready)
-        worker.failed.connect(self.on_spotify_playlist_failed)
+        worker.playlist_ready.connect(self.on_youtube_playlist_ready)
+        worker.playlist_progress.connect(self.on_pending_playlist_progress)
+        worker.failed.connect(self.on_youtube_playlist_failed)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self.on_spotify_playlist_import_finished)
+        thread.finished.connect(self.on_youtube_playlist_import_finished)
         thread.start()
 
-    def on_spotify_playlist_ready(self, playlist: PlaylistEntry) -> None:
-        if self.pending_playlist_index is None or self.pending_playlist_index >= len(self.playlists):
+    def on_youtube_playlist_ready(self, playlist: PlaylistEntry) -> None:
+        if self.pending_playlist_index is None or self.pending_playlist_index >= len(
+            self.playlists
+        ):
             return
+        self.refresh_local_music_tracks()
         playlist.is_loading = False
+        playlist.loading_current = len(playlist.tracks)
+        playlist.loading_total = len(playlist.tracks)
+        self.sync_remote_playlist_with_library(playlist, persist=False)
         self.playlists[self.pending_playlist_index] = playlist
         widget = self.playlist_item_widgets[self.pending_playlist_index]
         widget.set_title(playlist.name)
-        widget.set_loading(False)
+        self.update_playlist_item_status(self.pending_playlist_index)
         self.persist_playlist(self.pending_playlist_index)
         self.playlist_list.setCurrentRow(self.pending_playlist_index)
         self.on_playlist_selected(self.pending_playlist_index)
         self.update_start_button_state()
 
-    def on_spotify_playlist_failed(self, error_text: str) -> None:
-        if self.pending_playlist_index is not None and 0 <= self.pending_playlist_index < len(self.playlists):
+    def on_youtube_playlist_failed(self, error_text: str) -> None:
+        if (
+            self.pending_playlist_index is not None
+            and 0 <= self.pending_playlist_index < len(self.playlists)
+        ):
             self.playlists.pop(self.pending_playlist_index)
             self.playlist_item_widgets.pop(self.pending_playlist_index)
             item = self.playlist_list.takeItem(self.pending_playlist_index)
@@ -869,28 +1137,15 @@ class MainWindow(QMainWindow):
                 self.update_metadata_panel()
             self.pending_playlist_index = None
         self.update_start_button_state()
-        message = error_text or "Не удалось импортировать плейлист Spotify."
-        if "Client ID" in message or "Client Secret" in message or "инициализировать Spotify API" in message:
-            answer = QMessageBox.question(
-                self,
-                "Spotify",
-                f"{message}\n\nОткрыть диалог ввода Spotify-данных?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes,
-            )
-            if answer == QMessageBox.StandardButton.Yes:
-                self.spotify_credentials = {"client_id": "", "client_secret": ""}
-                self.ensure_spotify_credentials()
-            return
         QMessageBox.warning(
             self,
-            "Spotify",
-            message,
+            "YouTube",
+            error_text or "Не удалось импортировать плейлист YouTube.",
         )
 
-    def on_spotify_playlist_import_finished(self) -> None:
-        self.spotify_thread = None
-        self.spotify_worker = None
+    def on_youtube_playlist_import_finished(self) -> None:
+        self.youtube_thread = None
+        self.youtube_worker = None
         self.pending_playlist_index = None
         self.create_playlist_button.setEnabled(True)
         self.update_start_button_state()
@@ -902,30 +1157,38 @@ class MainWindow(QMainWindow):
         if row < 0 or row >= len(self.playlists):
             self.experimental_source_mode = "none"
             self.selected_playlist_index = None
-            self.selected_experimental_track_index = None
+            self.clear_experimental_track_selection()
             self.render_experimental_tracks([])
             self.update_metadata_panel()
             self.update_delete_files_checkbox_visibility()
             return
         self.experimental_source_mode = "playlist"
         if self.playlists[row].source == "manual":
-            self.playlists[row] = load_manual_playlist(self.playlists[row].source_url, self.music_library_dir)
+            self.playlists[row] = load_manual_playlist(
+                self.playlists[row].source_url, self.music_library_dir
+            )
             self.playlist_item_widgets[row].set_title(self.playlists[row].name)
         self.selected_playlist_index = row
         tracks = self.get_sorted_experimental_tracks(self.playlists[row].tracks)
-        self.selected_experimental_track_index = 0 if tracks else None
+        self.clear_experimental_track_selection()
+        if tracks:
+            self.selected_experimental_track_index = 0
+            self.selected_experimental_track_indexes = {0}
+            self.experimental_selection_anchor_index = 0
         self.render_experimental_tracks(tracks)
         self.update_metadata_panel()
         self.update_delete_files_checkbox_visibility()
         self.update_start_button_state()
 
-    def add_loading_playlist_entry(self, source_url: str) -> int:
+    def add_loading_playlist_entry(self, source_url: str, source: str) -> int:
         playlist = PlaylistEntry(
             name="Загрузка плейлиста...",
-            source="spotify",
+            source=source,
             source_url=source_url,
             tracks=[],
             is_loading=True,
+            loading_current=0,
+            loading_total=0,
         )
         self.playlists.append(playlist)
         row = self.add_playlist_list_item(playlist)
@@ -933,52 +1196,245 @@ class MainWindow(QMainWindow):
         self.on_playlist_selected(row)
         return row
 
+    def on_pending_playlist_progress(self, loaded_count: int, total_count: int) -> None:
+        if self.pending_playlist_index is None or not (
+            0 <= self.pending_playlist_index < len(self.playlists)
+        ):
+            return
+        playlist = self.playlists[self.pending_playlist_index]
+        playlist.loading_current = max(0, loaded_count)
+        playlist.loading_total = max(0, total_count)
+        if (
+            self.experimental_source_mode == "playlist"
+            and self.selected_playlist_index == self.pending_playlist_index
+        ):
+            self.refresh_experimental_source_view()
+            self.update_metadata_panel()
+
+    def get_current_experimental_tracks(
+        self,
+    ) -> list[RemoteTrack] | list[LocalMusicTrack]:
+        if self.experimental_source_mode == "all_music":
+            return self.get_sorted_experimental_tracks(self.local_music_tracks)
+        if (
+            self.experimental_source_mode == "playlist"
+            and self.selected_playlist_index is not None
+            and 0 <= self.selected_playlist_index < len(self.playlists)
+        ):
+            return self.get_sorted_experimental_tracks(
+                self.playlists[self.selected_playlist_index].tracks
+            )
+        return []
+
+    def apply_experimental_track_selection(self) -> None:
+        for card_index, card in enumerate(self.remote_track_cards):
+            card.set_selected(card_index in self.selected_experimental_track_indexes)
+
+    def clear_experimental_track_selection(self) -> None:
+        self.selected_experimental_track_index = None
+        self.selected_experimental_track_indexes = set()
+        self.experimental_selection_anchor_index = None
+
+    def set_single_experimental_track_selection(self, index: int) -> None:
+        self.selected_experimental_track_index = index
+        self.selected_experimental_track_indexes = {index}
+        self.experimental_selection_anchor_index = index
+        self.apply_experimental_track_selection()
+        self.update_metadata_panel()
+
+    def set_range_experimental_track_selection(self, index: int) -> None:
+        tracks = self.get_current_experimental_tracks()
+        if not tracks:
+            self.clear_experimental_track_selection()
+            self.apply_experimental_track_selection()
+            self.update_metadata_panel()
+            return
+        if self.experimental_selection_anchor_index is None:
+            self.set_single_experimental_track_selection(index)
+            return
+        start = min(self.experimental_selection_anchor_index, index)
+        end = max(self.experimental_selection_anchor_index, index)
+        self.selected_experimental_track_index = index
+        self.selected_experimental_track_indexes = set(range(start, end + 1))
+        self.apply_experimental_track_selection()
+        self.update_metadata_panel()
+
+    def get_selected_experimental_track_indexes(self) -> list[int]:
+        tracks = self.get_current_experimental_tracks()
+        valid_indexes = sorted(
+            index
+            for index in self.selected_experimental_track_indexes
+            if 0 <= index < len(tracks)
+        )
+        if valid_indexes:
+            return valid_indexes
+        if (
+            self.selected_experimental_track_index is not None
+            and 0 <= self.selected_experimental_track_index < len(tracks)
+        ):
+            return [self.selected_experimental_track_index]
+        return []
+
+    def get_selected_experimental_tracks(self) -> list[RemoteTrack | LocalMusicTrack]:
+        tracks = self.get_current_experimental_tracks()
+        return [tracks[index] for index in self.get_selected_experimental_track_indexes()]
+
+    def get_selected_experimental_file_paths(self) -> list[str]:
+        file_paths: list[str] = []
+        for track in self.get_selected_experimental_tracks():
+            if isinstance(track, LocalMusicTrack):
+                if track.file_path:
+                    file_paths.append(track.file_path)
+                continue
+            if track.local_file_path:
+                file_paths.append(track.local_file_path)
+        return file_paths
+
     def render_experimental_tracks(
         self,
-        tracks: list[SpotifyTrack] | list[LocalMusicTrack],
+        tracks: list[RemoteTrack] | list[LocalMusicTrack],
     ) -> None:
-        while self.spotify_tracks_layout.count():
-            item = self.spotify_tracks_layout.takeAt(0)
+        while self.playlist_tracks_layout.count():
+            item = self.playlist_tracks_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
 
-        self.spotify_track_cards = []
+        self.remote_track_cards = []
+        self.selected_experimental_track_indexes = {
+            index
+            for index in self.selected_experimental_track_indexes
+            if 0 <= index < len(tracks)
+        }
+        if (
+            self.selected_experimental_track_index is None
+            or self.selected_experimental_track_index >= len(tracks)
+        ):
+            self.selected_experimental_track_index = 0 if tracks else None
+        if self.selected_experimental_track_index is not None:
+            if not self.selected_experimental_track_indexes:
+                self.selected_experimental_track_indexes = {
+                    self.selected_experimental_track_index
+                }
+            if self.experimental_selection_anchor_index is None:
+                self.experimental_selection_anchor_index = (
+                    self.selected_experimental_track_index
+                )
         if not tracks:
-            self.spotify_tracks_empty = QLabel("Треки не найдены")
-            if self.experimental_source_mode == "all_music":
-                self.spotify_tracks_empty.setText("В папке music пока нет mp3-файлов")
-            elif self.selected_playlist_index is not None and 0 <= self.selected_playlist_index < len(self.playlists):
-                playlist = self.playlists[self.selected_playlist_index]
-                if playlist.is_loading:
-                    self.spotify_tracks_empty.setText("Подгружаем треки плейлиста...")
-                else:
-                    self.spotify_tracks_empty.setText(
-                        playlist.note or "Spotify не вернул треки для этого плейлиста"
-                    )
-            self.spotify_tracks_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.spotify_tracks_empty.setStyleSheet(
-                "font-size:14px; color:#8f98a6; padding:24px; background:transparent; border:none;"
+            self.clear_experimental_track_selection()
+            playlist = (
+                self.playlists[self.selected_playlist_index]
+                if self.selected_playlist_index is not None
+                and 0 <= self.selected_playlist_index < len(self.playlists)
+                else None
             )
-            self.spotify_tracks_layout.addWidget(self.spotify_tracks_empty)
-            self.spotify_tracks_layout.addStretch(1)
+
+            empty_container = QWidget()
+            empty_layout = QVBoxLayout(empty_container)
+            empty_layout.setContentsMargins(0, 24, 0, 24)
+            empty_layout.setSpacing(12)
+
+            self.playlist_tracks_empty = QLabel("Треки не найдены")
+            if self.experimental_source_mode == "all_music":
+                self.playlist_tracks_empty.setText("В папке music пока нет mp3-файлов")
+            elif playlist is not None and playlist.is_loading:
+                self.playlist_tracks_empty.setText("Подгружаем треки плейлиста...")
+            elif playlist is not None:
+                self.playlist_tracks_empty.setText(
+                    playlist.note or "YouTube не вернул треки для этого плейлиста"
+                )
+            self.playlist_tracks_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.playlist_tracks_empty.setStyleSheet(
+                "font-size:14px; color:#8f98a6; background:transparent; border:none;"
+            )
+            empty_layout.addWidget(
+                self.playlist_tracks_empty,
+                alignment=Qt.AlignmentFlag.AlignHCenter,
+            )
+
+            if playlist is not None and playlist.is_loading:
+                progress_bar = QProgressBar()
+                progress_bar.setFixedWidth(320)
+                progress_bar.setTextVisible(True)
+                progress_bar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                progress_bar.setStyleSheet(
+                    "QProgressBar {"
+                    "background:#2a2d33;"
+                    "border:1px solid #3a3f48;"
+                    "border-radius:8px;"
+                    "color:#eef2f7;"
+                    "height:18px;"
+                    "text-align:center;"
+                    "}"
+                    "QProgressBar::chunk { background:#5f9ee6; border-radius:7px; }"
+                )
+                if playlist.loading_total > 0:
+                    current = min(playlist.loading_current, playlist.loading_total)
+                    progress_bar.setRange(0, playlist.loading_total)
+                    progress_bar.setValue(current)
+                    progress_bar.setFormat(f"{current} / {playlist.loading_total}")
+                else:
+                    progress_bar.setRange(0, 0)
+                    progress_bar.setFormat("Подготовка...")
+                empty_layout.addWidget(
+                    progress_bar,
+                    alignment=Qt.AlignmentFlag.AlignHCenter,
+                )
+
+            self.playlist_tracks_layout.addWidget(empty_container)
+            self.playlist_tracks_layout.addStretch(1)
             return
 
         for track_index, track in enumerate(tracks):
-            card = SpotifyTrackCard(track, track_index, self.status_icons, self.metadata_icon)
-            card.selected.connect(self.on_spotify_track_selected)
+            card = RemoteTrackCard(
+                track, track_index, self.status_icons, self.metadata_icon
+            )
+            card.selected.connect(self.on_remote_track_selected)
+            card.context_requested.connect(self.on_remote_track_context_requested)
             card.delete_requested.connect(self.on_experimental_track_delete_requested)
-            card.metadata_requested.connect(self.on_experimental_track_metadata_requested)
-            card.set_selected(track_index == self.selected_experimental_track_index)
-            self.spotify_track_cards.append(card)
-            self.spotify_tracks_layout.addWidget(card)
-        self.spotify_tracks_layout.addStretch(1)
+            card.metadata_requested.connect(
+                self.on_experimental_track_metadata_requested
+            )
+            card.set_selected(track_index in self.selected_experimental_track_indexes)
+            self.remote_track_cards.append(card)
+            self.playlist_tracks_layout.addWidget(card)
+        self.playlist_tracks_layout.addStretch(1)
 
-    def on_spotify_track_selected(self, index: int) -> None:
-        self.selected_experimental_track_index = index
-        for card_index, card in enumerate(self.spotify_track_cards):
-            card.set_selected(card_index == index)
-        self.update_metadata_panel()
+    def on_remote_track_selected(self, index: int, modifiers_value: int) -> None:
+        modifiers = Qt.KeyboardModifier(modifiers_value)
+        if modifiers & Qt.KeyboardModifier.ShiftModifier:
+            self.set_range_experimental_track_selection(index)
+            return
+        self.set_single_experimental_track_selection(index)
+
+    def on_remote_track_context_requested(self, index: int, global_pos) -> None:
+        if index not in self.selected_experimental_track_indexes:
+            self.set_single_experimental_track_selection(index)
+
+        menu = QMenu(self)
+        selected_indexes = self.get_selected_experimental_track_indexes()
+        is_single_selection = len(selected_indexes) == 1
+
+        metadata_action = menu.addAction(
+            "Изменить метаданные"
+            if is_single_selection
+            else "Совместные метаданные"
+        )
+        add_to_playlist_action = menu.addAction("Добавить в плейлист")
+        delete_action = menu.addAction("Удалить")
+
+        selected_action = menu.exec(global_pos)
+        if selected_action == metadata_action:
+            if is_single_selection:
+                self.on_experimental_track_metadata_requested(selected_indexes[0])
+            else:
+                self.edit_shared_metadata_for_selected_tracks()
+            return
+        if selected_action == add_to_playlist_action:
+            self.add_selected_tracks_to_manual_playlist()
+            return
+        if selected_action == delete_action:
+            self.delete_selected_experimental_tracks()
 
     def on_experimental_track_delete_requested(self, index: int) -> None:
         if self.experimental_source_mode == "all_music":
@@ -990,15 +1446,24 @@ class MainWindow(QMainWindow):
     def on_experimental_track_metadata_requested(self, index: int) -> None:
         if self.experimental_source_mode == "all_music":
             tracks = self.get_sorted_experimental_tracks(self.local_music_tracks)
-        elif self.experimental_source_mode == "playlist" and self.selected_playlist_index is not None:
-            tracks = self.get_sorted_experimental_tracks(self.playlists[self.selected_playlist_index].tracks)
+        elif (
+            self.experimental_source_mode == "playlist"
+            and self.selected_playlist_index is not None
+        ):
+            tracks = self.get_sorted_experimental_tracks(
+                self.playlists[self.selected_playlist_index].tracks
+            )
         else:
             return
 
         if not (0 <= index < len(tracks)):
             return
         track = tracks[index]
-        file_path = track.file_path if isinstance(track, LocalMusicTrack) else track.local_file_path
+        file_path = (
+            track.file_path
+            if isinstance(track, LocalMusicTrack)
+            else track.local_file_path
+        )
         if not file_path:
             QMessageBox.information(
                 self,
@@ -1020,47 +1485,131 @@ class MainWindow(QMainWindow):
             meta_group="",
             meta_album=track.album,
         )
-        dialog = MetadataDialog(self, dialog_task, self.cover_pick_icon, self.cover_reset_icon)
+        dialog = MetadataDialog(
+            self, dialog_task, self.cover_pick_icon, self.cover_reset_icon
+        )
         dialog.url_edit.setReadOnly(True)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
         values, cover_path, cover_mode = dialog.get_metadata_values()
+        resolved_values = self.resolve_metadata_values_for_track(track, values)
         try:
             apply_mp3_metadata(
                 file_path,
-                title=values["title"],
-                author=values["author"],
-                group=values["group"],
-                album=values["album"],
+                title=resolved_values["title"],
+                author=resolved_values["author"],
+                group=resolved_values["group"],
+                album=resolved_values["album"],
                 cover_mode=cover_mode,
                 cover_path=cover_path,
             )
         except Exception as exc:
-            QMessageBox.warning(self, "Метаданные", f"Не удалось обновить mp3-метаданные:\n{exc}")
+            QMessageBox.warning(
+                self, "Метаданные", f"Не удалось обновить mp3-метаданные:\n{exc}"
+            )
             return
 
-        self.refresh_experimental_track_sources_after_metadata_edit(file_path)
+        try:
+            final_file_path = self.relocate_music_file_after_metadata_edit(
+                file_path,
+                title=resolved_values["title"],
+                author=resolved_values["author"],
+                album=resolved_values["album"],
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Метаданные", f"Не удалось переместить mp3-файл:\n{exc}"
+            )
+            return
 
-    def refresh_experimental_track_sources_after_metadata_edit(self, file_path: str) -> None:
+        self.refresh_experimental_track_sources_after_metadata_edit(final_file_path)
+
+    def relocate_music_file_after_metadata_edit(
+        self,
+        file_path: str,
+        *,
+        title: str,
+        author: str,
+        album: str,
+    ) -> str:
+        source_path = os.path.realpath(file_path)
+        if not os.path.exists(source_path):
+            return source_path
+
+        target_path = os.path.realpath(
+            build_music_file_path(
+                self.music_library_dir,
+                title=title,
+                artist=author,
+                album=album,
+                extension=".mp3",
+                separator=" - ",
+            )
+        )
+        if source_path == target_path:
+            return source_path
+
+        final_target_path = target_path
+        if os.path.exists(target_path):
+            if os.path.samefile(source_path, target_path):
+                return source_path
+            final_target_path = ensure_unique_music_file_path(target_path)
+
+        os.makedirs(os.path.dirname(final_target_path), exist_ok=True)
+        shutil.move(source_path, final_target_path)
+        self.cleanup_empty_music_directories(os.path.dirname(source_path))
+        rewrite_track_references_in_playlists(
+            self.playlists_dir,
+            self.music_library_dir,
+            source_path,
+            final_target_path,
+        )
+        return os.path.realpath(final_target_path)
+
+    def cleanup_empty_music_directories(self, start_directory: str) -> None:
+        music_root = os.path.realpath(self.music_library_dir)
+        current_dir = os.path.realpath(start_directory)
+        while (
+            current_dir
+            and current_dir.startswith(music_root)
+            and current_dir != music_root
+        ):
+            try:
+                if os.listdir(current_dir):
+                    break
+                os.rmdir(current_dir)
+            except OSError:
+                break
+            current_dir = os.path.dirname(current_dir)
+
+    def resolve_metadata_values_for_track(
+        self,
+        track: RemoteTrack | LocalMusicTrack,
+        values: dict[str, str],
+    ) -> dict[str, str]:
+        return {
+            "title": values["title"].strip() or track.title,
+            "author": values["author"].strip() or track.artists,
+            "group": values["group"].strip(),
+            "album": values["album"].strip() or track.album,
+        }
+
+    def refresh_experimental_track_sources_after_metadata_edit(
+        self, file_path: str
+    ) -> None:
         resolved_path = os.path.realpath(file_path)
         self.refresh_local_music_tracks()
 
         for playlist_index, playlist in enumerate(self.playlists):
             if playlist.source == "manual":
-                contains_track = any(
-                    isinstance(track, LocalMusicTrack)
-                    and os.path.realpath(track.file_path) == resolved_path
-                    for track in playlist.tracks
+                self.playlists[playlist_index] = load_manual_playlist(
+                    playlist.source_url,
+                    self.music_library_dir,
                 )
-                if contains_track:
-                    self.playlists[playlist_index] = load_manual_playlist(
-                        playlist.source_url,
-                        self.music_library_dir,
-                    )
                 continue
 
-            if playlist.source != "spotify":
+            if playlist.source != "youtube":
                 continue
 
             refreshed = None
@@ -1073,7 +1622,11 @@ class MainWindow(QMainWindow):
 
             changed = False
             for track in playlist.tracks:
-                if isinstance(track, SpotifyTrack) and track.local_file_path and os.path.realpath(track.local_file_path) == resolved_path:
+                if (
+                    isinstance(track, RemoteTrack)
+                    and track.local_file_path
+                    and os.path.realpath(track.local_file_path) == resolved_path
+                ):
                     track.title = refreshed.title
                     track.artists = refreshed.artists
                     track.album = refreshed.album
@@ -1084,82 +1637,270 @@ class MainWindow(QMainWindow):
 
         self.refresh_experimental_source_view()
 
-    def delete_track_from_all_music(self, index: int) -> None:
-        tracks = self.get_sorted_experimental_tracks(self.local_music_tracks)
-        if not (0 <= index < len(tracks)):
+    def add_selected_tracks_to_manual_playlist(self) -> None:
+        selected_file_paths = self.get_selected_experimental_file_paths()
+        if not selected_file_paths:
+            QMessageBox.information(
+                self,
+                "Добавить в плейлист",
+                "Среди выбранных треков нет доступных mp3-файлов.",
+            )
             return
-        track = tracks[index]
+
+        manual_playlists = [
+            (index, playlist)
+            for index, playlist in enumerate(self.playlists)
+            if playlist.source == "manual"
+        ]
+        if not manual_playlists:
+            QMessageBox.information(
+                self,
+                "Добавить в плейлист",
+                "Сначала создайте хотя бы один ручной плейлист.",
+            )
+            return
+
+        playlist_names = [playlist.name for _, playlist in manual_playlists]
+        selected_name, accepted = QInputDialog.getItem(
+            self,
+            "Добавить в плейлист",
+            "Выберите плейлист:",
+            playlist_names,
+            0,
+            False,
+        )
+        if not accepted or not selected_name:
+            return
+
+        target_index = next(
+            (
+                index
+                for index, playlist in manual_playlists
+                if playlist.name == selected_name
+            ),
+            None,
+        )
+        if target_index is None:
+            return
+
+        updated_playlist = append_tracks_to_manual_playlist(
+            self.playlists[target_index].source_url,
+            selected_file_paths,
+            self.music_library_dir,
+        )
+        self.playlists[target_index] = updated_playlist
+        self.playlist_item_widgets[target_index].set_title(updated_playlist.name)
+        if self.selected_playlist_index == target_index:
+            self.on_playlist_selected(target_index)
+
+    def edit_shared_metadata_for_selected_tracks(self) -> None:
+        selected_tracks = self.get_selected_experimental_tracks()
+        file_backed_tracks: list[tuple[RemoteTrack | LocalMusicTrack, str]] = []
+        for track in selected_tracks:
+            file_path = (
+                track.file_path
+                if isinstance(track, LocalMusicTrack)
+                else track.local_file_path
+            )
+            if file_path and os.path.exists(file_path):
+                file_backed_tracks.append((track, file_path))
+
+        if not file_backed_tracks:
+            QMessageBox.information(
+                self,
+                "Совместные метаданные",
+                "Для выбранных треков не найдено доступных mp3-файлов.",
+            )
+            return
+
+        def common_value(values: list[str]) -> str:
+            normalized = [value.strip() for value in values]
+            return normalized[0] if normalized and all(value == normalized[0] for value in normalized) else ""
+
+        selected_count = len(file_backed_tracks)
+        tracks_only = [track for track, _ in file_backed_tracks]
+        first_track = tracks_only[0]
+        dialog_task = DownloadTask(
+            url=f"Выбрано треков: {selected_count}",
+            title=common_value([track.title for track in tracks_only]),
+            channel=common_value([track.artists for track in tracks_only]),
+            thumbnail_data=first_track.thumbnail_data,
+            meta_title=common_value([track.title for track in tracks_only]),
+            meta_author=common_value([track.artists for track in tracks_only]),
+            meta_group="",
+            meta_album=common_value([track.album for track in tracks_only]),
+        )
+        dialog = MetadataDialog(
+            self, dialog_task, self.cover_pick_icon, self.cover_reset_icon
+        )
+        dialog.setWindowTitle("Совместные метаданные")
+        dialog.url_edit.setReadOnly(True)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        values, cover_path, cover_mode = dialog.get_metadata_values()
+        updated_file_paths: list[str] = []
+        for track, file_path in file_backed_tracks:
+            resolved_values = self.resolve_metadata_values_for_track(track, values)
+            try:
+                apply_mp3_metadata(
+                    file_path,
+                    title=resolved_values["title"],
+                    author=resolved_values["author"],
+                    group=resolved_values["group"],
+                    album=resolved_values["album"],
+                    cover_mode=cover_mode,
+                    cover_path=cover_path,
+                )
+                final_file_path = self.relocate_music_file_after_metadata_edit(
+                    file_path,
+                    title=resolved_values["title"],
+                    author=resolved_values["author"],
+                    album=resolved_values["album"],
+                )
+                updated_file_paths.append(final_file_path)
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    "Совместные метаданные",
+                    f"Не удалось обновить mp3-метаданные:\n{exc}",
+                )
+                return
+
+        for file_path in updated_file_paths:
+            self.refresh_experimental_track_sources_after_metadata_edit(file_path)
+
+    def delete_selected_experimental_tracks(self) -> None:
+        selected_indexes = self.get_selected_experimental_track_indexes()
+        if not selected_indexes:
+            return
+        if self.experimental_source_mode == "all_music":
+            self.delete_tracks_from_all_music(selected_indexes)
+            return
+        if self.experimental_source_mode == "playlist":
+            self.delete_tracks_from_selected_playlist(selected_indexes)
+
+    def delete_track_from_all_music(self, index: int) -> None:
+        self.delete_tracks_from_all_music([index])
+
+    def delete_tracks_from_all_music(self, indexes: list[int]) -> None:
+        tracks = self.get_sorted_experimental_tracks(self.local_music_tracks)
+        selected_tracks = [tracks[index] for index in indexes if 0 <= index < len(tracks)]
+        if not selected_tracks:
+            return
         answer = QMessageBox.question(
             self,
             "Удаление трека",
-            f"Удалить файл '{os.path.basename(track.file_path)}' из папки music?",
+            (
+                f"Удалить {len(selected_tracks)} файл(ов) из папки music?"
+                if len(selected_tracks) > 1
+                else f"Удалить файл '{os.path.basename(selected_tracks[0].file_path)}' из папки music?"
+            ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
 
-        if os.path.exists(track.file_path):
-            os.remove(track.file_path)
+        for track in selected_tracks:
+            if os.path.exists(track.file_path):
+                os.remove(track.file_path)
         self.refresh_local_music_tracks()
         refreshed_tracks = self.get_sorted_experimental_tracks(self.local_music_tracks)
-        self.selected_experimental_track_index = min(index, len(refreshed_tracks) - 1) if refreshed_tracks else None
+        self.clear_experimental_track_selection()
+        if refreshed_tracks:
+            next_index = min(min(indexes), len(refreshed_tracks) - 1)
+            self.selected_experimental_track_index = next_index
+            self.selected_experimental_track_indexes = {next_index}
+            self.experimental_selection_anchor_index = next_index
         self.render_experimental_tracks(refreshed_tracks)
         self.update_metadata_panel()
 
     def delete_track_from_selected_playlist(self, index: int) -> None:
-        if self.selected_playlist_index is None or not (0 <= self.selected_playlist_index < len(self.playlists)):
+        self.delete_tracks_from_selected_playlist([index])
+
+    def delete_tracks_from_selected_playlist(self, indexes: list[int]) -> None:
+        if self.selected_playlist_index is None or not (
+            0 <= self.selected_playlist_index < len(self.playlists)
+        ):
             return
         playlist = self.playlists[self.selected_playlist_index]
         tracks = self.get_sorted_experimental_tracks(playlist.tracks)
-        if not (0 <= index < len(tracks)):
+        selected_tracks = [tracks[index] for index in indexes if 0 <= index < len(tracks)]
+        if not selected_tracks:
             return
-        track = tracks[index]
         delete_files = self.delete_files_checkbox.isChecked()
         answer = QMessageBox.question(
             self,
             "Удаление трека",
-            "Удалить выбранный трек?",
+            (
+                "Удалить выбранные треки?"
+                if len(selected_tracks) > 1
+                else "Удалить выбранный трек?"
+            ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
 
-        if isinstance(track, LocalMusicTrack):
-            if delete_files and os.path.exists(track.file_path):
-                os.remove(track.file_path)
-            if playlist.source == "manual":
+        if playlist.source == "manual":
+            file_paths_to_remove = [
+                track.file_path
+                for track in selected_tracks
+                if isinstance(track, LocalMusicTrack)
+            ]
+            if delete_files:
+                for file_path in file_paths_to_remove:
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+            updated_playlist = playlist
+            for file_path in file_paths_to_remove:
                 updated_playlist = remove_track_from_manual_playlist(
-                    playlist.source_url,
-                    track.file_path,
+                    updated_playlist.source_url,
+                    file_path,
                     self.music_library_dir,
                 )
-                self.playlists[self.selected_playlist_index] = updated_playlist
-                playlist = updated_playlist
-            else:
-                playlist.tracks = [item for item in playlist.tracks if item is not track]
-                self.persist_playlist(self.selected_playlist_index)
+            self.playlists[self.selected_playlist_index] = updated_playlist
+            playlist = updated_playlist
         else:
-            if delete_files and track.local_file_path and os.path.exists(track.local_file_path):
-                os.remove(track.local_file_path)
-                track.local_file_path = ""
-                if track.status == STATUS_DONE:
-                    track.status = STATUS_PENDING
-            playlist.tracks = [item for item in playlist.tracks if item is not track]
+            file_paths_to_delete = []
+            selected_track_ids = {id(track) for track in selected_tracks}
+            for track in selected_tracks:
+                if isinstance(track, RemoteTrack):
+                    if track.local_file_path:
+                        file_paths_to_delete.append(track.local_file_path)
+                elif track.file_path:
+                    file_paths_to_delete.append(track.file_path)
+            if delete_files:
+                for file_path in file_paths_to_delete:
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+            playlist.tracks = [
+                item for item in playlist.tracks if id(item) not in selected_track_ids
+            ]
             self.persist_playlist(self.selected_playlist_index)
 
         if playlist.source == "manual":
-            self.playlist_item_widgets[self.selected_playlist_index].set_title(playlist.name)
+            self.playlist_item_widgets[self.selected_playlist_index].set_title(
+                playlist.name
+            )
         self.refresh_local_music_tracks()
         refreshed_tracks = self.get_sorted_experimental_tracks(playlist.tracks)
-        self.selected_experimental_track_index = min(index, len(refreshed_tracks) - 1) if refreshed_tracks else None
+        self.clear_experimental_track_selection()
+        if refreshed_tracks:
+            next_index = min(min(indexes), len(refreshed_tracks) - 1)
+            self.selected_experimental_track_index = next_index
+            self.selected_experimental_track_indexes = {next_index}
+            self.experimental_selection_anchor_index = next_index
         self.render_experimental_tracks(refreshed_tracks)
         self.update_metadata_panel()
         self.update_start_button_state()
 
     def select_task(self, index: int | None) -> None:
-        self.selected_task_index = index if index is not None and 0 <= index < len(self.tasks) else None
+        self.selected_task_index = (
+            index if index is not None and 0 <= index < len(self.tasks) else None
+        )
         for card_index, card in enumerate(self.cards):
             card.set_selected(card_index == self.selected_task_index)
         self.update_metadata_panel()
@@ -1168,9 +1909,13 @@ class MainWindow(QMainWindow):
         if self.experimental_mode_toggle.isChecked():
             if self.experimental_source_mode == "all_music":
                 track = (
-                    self.get_sorted_experimental_tracks(self.local_music_tracks)[self.selected_experimental_track_index]
+                    self.get_sorted_experimental_tracks(self.local_music_tracks)[
+                        self.selected_experimental_track_index
+                    ]
                     if self.selected_experimental_track_index is not None
-                    and 0 <= self.selected_experimental_track_index < len(self.local_music_tracks)
+                    and 0
+                    <= self.selected_experimental_track_index
+                    < len(self.local_music_tracks)
                     else None
                 )
                 values = {
@@ -1179,12 +1924,15 @@ class MainWindow(QMainWindow):
                     "URL": track.file_path if track else "—",
                     "Автор": track.artists if track else "—",
                     "Альбом": track.album if track else "—",
-                    "Статус": self.get_track_status_title(track) if track else "Нет треков",
+                    "Статус": self.get_track_status_title(track)
+                    if track
+                    else "Нет треков",
                 }
             else:
                 playlist = (
                     self.playlists[self.selected_playlist_index]
-                    if self.selected_playlist_index is not None and 0 <= self.selected_playlist_index < len(self.playlists)
+                    if self.selected_playlist_index is not None
+                    and 0 <= self.selected_playlist_index < len(self.playlists)
                     else None
                 )
                 sorted_tracks = (
@@ -1202,24 +1950,32 @@ class MainWindow(QMainWindow):
                     "Название": track.title if track else "Трек не выбран",
                     "Канал": playlist.name if playlist else "—",
                     "URL": (
-                        track.spotify_url
-                        if isinstance(track, SpotifyTrack)
+                        track.source_url
+                        if isinstance(track, RemoteTrack)
                         else track.file_path
-                    ) if track else "—",
+                    )
+                    if track
+                    else "—",
                     "Автор": track.artists if track else "—",
                     "Альбом": track.album if track else "—",
                     "Статус": (
                         self.get_track_status_title(track)
                         if track
                         else (
-                            "Подгрузка Spotify-плейлиста"
+                            "Подгрузка плейлиста"
                             if playlist and playlist.is_loading
-                            else (playlist.note or "Нет треков") if playlist else "Нет треков"
+                            else (playlist.note or "Нет треков")
+                            if playlist
+                            else "Нет треков"
                         )
                     ),
                 }
         else:
-            task = self.tasks[self.selected_task_index] if self.selected_task_index is not None else None
+            task = (
+                self.tasks[self.selected_task_index]
+                if self.selected_task_index is not None
+                else None
+            )
             if task is None:
                 values = {
                     "Название": "Трек не выбран",
@@ -1255,8 +2011,11 @@ class MainWindow(QMainWindow):
         self.select_root_icon = self.cover_pick_icon
         self.open_folder_icon = QIcon(self.themed_icon_path("folder"))
         self.add_playlist_icon = QIcon(self.themed_icon_path("add_playlist"))
+        self.new_track_icon = self.add_playlist_icon
         self.import_icon = QIcon(self.themed_icon_path("file"))
         self.start_icon = QIcon(self.themed_icon_path("mass_download"))
+        self.sort_date_icon = QIcon(self.themed_icon_path("number"))
+        self.sort_title_icon = QIcon(self.themed_icon_path("by_name"))
         self.status_icons = {
             STATUS_PENDING: QIcon(self.themed_icon_path("to_download")),
             STATUS_META_LOADING: QIcon(self.themed_icon_path("downloading")),
@@ -1276,21 +2035,58 @@ class MainWindow(QMainWindow):
         if hasattr(self, "create_playlist_button"):
             self.create_playlist_button.setIcon(self.add_playlist_icon)
             self.create_playlist_button.setIconSize(QSize(18, 18))
+        if hasattr(self, "new_track_button"):
+            self.new_track_button.setIcon(self.new_track_icon)
+            self.new_track_button.setIconSize(QSize(18, 18))
         if hasattr(self, "import_button"):
             self.import_button.setIcon(self.import_icon)
             self.import_button.setIconSize(QSize(18, 18))
         if hasattr(self, "start_button"):
             self.start_button.setIcon(self.start_icon)
             self.start_button.setIconSize(QSize(18, 18))
+        if hasattr(self, "sort_date_button"):
+            self.sort_date_button.setIcon(self.sort_date_icon)
+            self.sort_date_button.setIconSize(QSize(18, 18))
+        if hasattr(self, "sort_title_button"):
+            self.sort_title_button.setIcon(self.sort_title_icon)
+            self.sort_title_button.setIconSize(QSize(18, 18))
         for widget in self.playlist_item_widgets:
             widget.set_loading_icon(self.playlist_loading_icon)
             widget.set_ready_icon(self.playlist_ready_icon)
         for card in self.cards:
             card.set_metadata_icon(self.metadata_icon)
             card.set_status_icons(self.status_icons)
-        for card in self.spotify_track_cards:
+        for card in self.remote_track_cards:
             card.set_status_icons(self.status_icons)
             card.set_metadata_icon(self.metadata_icon)
+
+    def on_single_track_download_finished(
+        self, index: int, success: bool, error_text: str
+    ) -> None:
+        del index
+        if success:
+            self.refresh_local_music_tracks()
+            if (
+                self.experimental_mode_toggle.isChecked()
+                and self.experimental_source_mode == "all_music"
+            ):
+                tracks = self.get_sorted_experimental_tracks(self.local_music_tracks)
+                self.selected_experimental_track_index = 0 if tracks else None
+                self.render_experimental_tracks(tracks)
+                self.update_metadata_panel()
+            return
+        QMessageBox.warning(
+            self,
+            "Новый трек",
+            error_text or "Не удалось сохранить mp3 в папку music.",
+        )
+
+    def on_single_track_download_thread_finished(self) -> None:
+        self.download_thread = None
+        self.download_worker = None
+        self.new_track_button.setEnabled(True)
+        self.import_button.setEnabled(True)
+        self.update_start_button_state()
 
     def choose_ffmpeg_directory(self) -> bool:
         selected_dir = QFileDialog.getExistingDirectory(
@@ -1353,8 +2149,20 @@ class MainWindow(QMainWindow):
         env = os.environ.copy()
         path = env.get("PATH", "")
         env["PATH"] = f"{directory}:{path}" if path else directory
-        ffmpeg_check = subprocess.run([ffmpeg_path, "-version"], capture_output=True, text=True, check=False, env=env)
-        ffprobe_check = subprocess.run([ffprobe_path, "-version"], capture_output=True, text=True, check=False, env=env)
+        ffmpeg_check = subprocess.run(
+            [ffmpeg_path, "-version"],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        ffprobe_check = subprocess.run(
+            [ffprobe_path, "-version"],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
         return ffmpeg_check.returncode == 0 and ffprobe_check.returncode == 0
 
     def ensure_ffmpeg_available(self) -> None:
@@ -1383,13 +2191,19 @@ class MainWindow(QMainWindow):
             "Приложение не нашло ffmpeg и ffprobe в путях по умолчанию.\n"
             "Выберите один из вариантов установки/настройки."
         )
-        manual_button = message.addButton("Выбрать вручную", QMessageBox.ButtonRole.ActionRole)
+        manual_button = message.addButton(
+            "Выбрать вручную", QMessageBox.ButtonRole.ActionRole
+        )
         brew_button = None
         port_button = None
         if shutil.which("brew"):
-            brew_button = message.addButton("Установить через brew", QMessageBox.ButtonRole.ActionRole)
+            brew_button = message.addButton(
+                "Установить через brew", QMessageBox.ButtonRole.ActionRole
+            )
         if shutil.which("port"):
-            port_button = message.addButton("Установить через ports", QMessageBox.ButtonRole.ActionRole)
+            port_button = message.addButton(
+                "Установить через ports", QMessageBox.ButtonRole.ActionRole
+            )
         message.addButton(QMessageBox.StandardButton.Cancel)
         message.exec()
 
@@ -1436,7 +2250,9 @@ class MainWindow(QMainWindow):
             self.import_links_for_experimental_mode()
             return
         if self.metadata_thread is not None:
-            QMessageBox.information(self, "Импорт", "Дождитесь завершения подгрузки метаданных.")
+            QMessageBox.information(
+                self, "Импорт", "Дождитесь завершения подгрузки метаданных."
+            )
             return
 
         txt_file, _ = QFileDialog.getOpenFileName(
@@ -1505,16 +2321,160 @@ class MainWindow(QMainWindow):
 
     def on_experimental_import_completed(self) -> None:
         self.refresh_local_music_tracks()
-        if self.experimental_mode_toggle.isChecked() and self.experimental_source_mode == "all_music":
+        if (
+            self.experimental_mode_toggle.isChecked()
+            and self.experimental_source_mode == "all_music"
+        ):
             tracks = self.get_sorted_experimental_tracks(self.local_music_tracks)
-            if tracks and (self.selected_experimental_track_index is None or self.selected_experimental_track_index >= len(tracks)):
+            if tracks and (
+                self.selected_experimental_track_index is None
+                or self.selected_experimental_track_index >= len(tracks)
+            ):
                 self.selected_experimental_track_index = 0
             self.render_experimental_tracks(tracks)
             self.update_metadata_panel()
 
+    def add_new_track_for_experimental_mode(self) -> None:
+        if any(
+            thread is not None
+            for thread in (
+                self.metadata_thread,
+                self.download_thread,
+                self.youtube_thread,
+                self.youtube_download_thread,
+            )
+        ):
+            QMessageBox.information(
+                self,
+                "Новый трек",
+                "Дождитесь завершения текущей обработки.",
+            )
+            return
+
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle("Новый трек")
+        dialog.setLabelText("Вставьте ссылку на трек:")
+        dialog.setTextEchoMode(QLineEdit.EchoMode.Normal)
+        dialog.resize(760, dialog.sizeHint().height())
+        dialog.setMinimumWidth(760)
+        ok = dialog.exec()
+        link = dialog.textValue().strip()
+        if not ok or not link:
+            return
+
+        task = self.fetch_metadata_for_single_track(link)
+        if task is None:
+            return
+
+        metadata_dialog = MetadataDialog(
+            self, task, self.cover_pick_icon, self.cover_reset_icon
+        )
+        if metadata_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        values, cover_path, cover_mode = metadata_dialog.get_metadata_values()
+        if not values["url"]:
+            QMessageBox.warning(self, "Новый трек", "Ссылка не может быть пустой.")
+            return
+
+        task.url = values["url"]
+        task.meta_title = values["title"]
+        task.meta_author = values["author"]
+        task.meta_group = values["group"]
+        task.meta_album = values["album"]
+        if cover_mode == "custom":
+            task.meta_cover_path = cover_path
+        elif cover_mode == "clear":
+            task.meta_cover_path = ""
+
+        self.download_single_track_to_music(task)
+
+    def fetch_metadata_for_single_track(self, url: str) -> DownloadTask | None:
+        task = DownloadTask(url=url)
+        options = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "noplaylist": True,
+        }
+        try:
+            with yt_dlp.YoutubeDL(options) as ydl:
+                info = ydl.extract_info(url, download=False)
+            task.title = info.get("title") or url
+            task.channel = (
+                info.get("channel")
+                or info.get("uploader")
+                or info.get("uploader_id")
+                or "Неизвестный канал"
+            )
+            thumbnail_url = info.get("thumbnail")
+            if thumbnail_url:
+                try:
+                    with urllib.request.urlopen(thumbnail_url, timeout=15) as response:
+                        task.thumbnail_data = response.read()
+                except Exception:
+                    task.thumbnail_data = None
+            task.meta_title = (info.get("track") or info.get("title") or "").strip()
+            task.meta_author = (
+                info.get("artist") or info.get("uploader") or info.get("channel") or ""
+            ).strip()
+            task.meta_group = (info.get("album_artist") or "").strip()
+            task.meta_album = (info.get("album") or "").strip()
+            task.status = STATUS_PENDING
+            return task
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Новый трек",
+                f"Не удалось получить метаданные по ссылке:\n{exc}",
+            )
+            return None
+
+    def download_single_track_to_music(self, task: DownloadTask) -> None:
+        self.ensure_elenveil_directories()
+        output_template = build_music_output_template(
+            self.music_library_dir,
+            title=task.meta_title or task.title,
+            artist=task.meta_author,
+            album=task.meta_album,
+            separator=" - ",
+        )
+        metadata_overrides = {
+            "title": task.meta_title,
+            "artist": task.meta_author,
+            "album_artist": task.meta_group,
+            "album": task.meta_album,
+        }
+
+        worker = DownloadWorker(
+            0,
+            task.url,
+            self.music_library_dir,
+            metadata_overrides,
+            task.meta_cover_path,
+            self.ffmpeg_location,
+            output_template=output_template,
+        )
+        thread = QThread(self)
+        self.download_worker = worker
+        self.download_thread = thread
+        self.new_track_button.setEnabled(False)
+        self.import_button.setEnabled(False)
+        self.start_button.setEnabled(False)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self.on_single_track_download_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self.on_single_track_download_thread_finished)
+        thread.start()
+
     def add_link_from_dialog(self) -> None:
         if self.metadata_thread is not None:
-            QMessageBox.information(self, "Добавить", "Дождитесь завершения подгрузки метаданных.")
+            QMessageBox.information(
+                self, "Добавить", "Дождитесь завершения подгрузки метаданных."
+            )
             return
 
         dialog = QInputDialog(self)
@@ -1536,7 +2496,9 @@ class MainWindow(QMainWindow):
         for offset, link in enumerate(links):
             task = DownloadTask(url=link)
             self.tasks.append(task)
-            card = DownloadCard(task, start_index + offset, self.metadata_icon, self.status_icons)
+            card = DownloadCard(
+                task, start_index + offset, self.metadata_icon, self.status_icons
+            )
             card.metadata_requested.connect(self.on_card_metadata_requested)
             card.delete_requested.connect(self.on_card_delete_requested)
             card.selected.connect(self.on_card_selected)
@@ -1582,11 +2544,11 @@ class MainWindow(QMainWindow):
         task.thumbnail_data = thumbnail_data
         task.status = STATUS_PENDING
         task.error = error_text
-        task.meta_title = (task.meta_title or extracted_meta.get("title") or title).strip()
+        task.meta_title = (
+            task.meta_title or extracted_meta.get("title") or title
+        ).strip()
         task.meta_author = (
-            task.meta_author
-            or extracted_meta.get("author")
-            or channel
+            task.meta_author or extracted_meta.get("author") or channel
         ).strip()
         task.meta_group = (task.meta_group or extracted_meta.get("group") or "").strip()
         task.meta_album = (task.meta_album or extracted_meta.get("album") or "").strip()
@@ -1598,7 +2560,9 @@ class MainWindow(QMainWindow):
         self.metadata_thread = None
         self.metadata_worker = None
         self.import_button.setEnabled(True)
-        self.start_button.setEnabled(any(task.status == STATUS_PENDING for task in self.tasks))
+        self.start_button.setEnabled(
+            any(task.status == STATUS_PENDING for task in self.tasks)
+        )
 
     def on_card_selected(self, index: int) -> None:
         self.select_task(index)
@@ -1622,7 +2586,9 @@ class MainWindow(QMainWindow):
         values, cover_path, cover_mode = dialog.get_metadata_values()
         new_url = values["url"]
         if not new_url:
-            QMessageBox.warning(self, "Некорректная ссылка", "Ссылка не может быть пустой.")
+            QMessageBox.warning(
+                self, "Некорректная ссылка", "Ссылка не может быть пустой."
+            )
             return
 
         task.meta_title = values["title"]
@@ -1692,7 +2658,9 @@ class MainWindow(QMainWindow):
             self.select_task(min(index, len(self.tasks) - 1))
         elif self.selected_task_index > index:
             self.select_task(self.selected_task_index - 1)
-        self.start_button.setEnabled(any(task.status == STATUS_PENDING for task in self.tasks))
+        self.start_button.setEnabled(
+            any(task.status == STATUS_PENDING for task in self.tasks)
+        )
 
     def renumber_cards(self) -> None:
         for index, card in enumerate(self.cards):
@@ -1700,11 +2668,13 @@ class MainWindow(QMainWindow):
 
     def start_downloads(self) -> None:
         if self.experimental_mode_toggle.isChecked():
-            self.start_spotify_track_downloads()
+            self.start_playlist_track_downloads()
             return
 
         if self.metadata_thread is not None:
-            QMessageBox.information(self, "Старт", "Дождитесь завершения подгрузки метаданных.")
+            QMessageBox.information(
+                self, "Старт", "Дождитесь завершения подгрузки метаданных."
+            )
             return
 
         if self.download_thread is not None:
@@ -1728,26 +2698,46 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(False)
         self.start_next_download()
 
-    def start_spotify_track_downloads(self) -> None:
-        if self.spotify_thread is not None:
-            QMessageBox.information(self, "Старт", "Дождитесь завершения импорта Spotify-плейлиста.")
+    def start_playlist_track_downloads(self) -> None:
+        if self.youtube_thread is not None:
+            QMessageBox.information(
+                self, "Старт", "Дождитесь завершения импорта плейлиста."
+            )
             return
-        if self.spotify_download_thread is not None:
-            QMessageBox.information(self, "Старт", "Загрузка Spotify-треков уже выполняется.")
+        if self.youtube_download_thread is not None:
+            QMessageBox.information(
+                self, "Старт", "Загрузка треков плейлиста уже выполняется."
+            )
             return
-        if self.experimental_source_mode != "playlist" or self.selected_playlist_index is None:
-            QMessageBox.information(self, "Старт", "Выберите Spotify-плейлист в левой панели.")
+        if (
+            self.experimental_source_mode != "playlist"
+            or self.selected_playlist_index is None
+        ):
+            QMessageBox.information(
+                self, "Старт", "Выберите плейлист в левой панели."
+            )
             return
 
         playlist = self.playlists[self.selected_playlist_index]
-        if playlist.source != "spotify":
-            QMessageBox.information(self, "Старт", "Сейчас загрузка через spotdl доступна только для Spotify-плейлистов.")
+        if playlist.source == "youtube":
+            self.start_youtube_track_downloads(playlist)
+            return
+        QMessageBox.information(
+            self,
+            "Старт",
+            "Сейчас загрузка доступна только для YouTube-плейлистов.",
+        )
+
+    def start_youtube_track_downloads(self, playlist: PlaylistEntry) -> None:
+        if playlist.source != "youtube":
             return
         if playlist.is_loading:
             QMessageBox.information(self, "Старт", "Плейлист ещё подгружается.")
             return
         if not playlist.tracks:
-            QMessageBox.information(self, "Старт", "В выбранном плейлисте нет треков для загрузки.")
+            QMessageBox.information(
+                self, "Старт", "В выбранном плейлисте нет треков для загрузки."
+            )
             return
 
         downloadable_indexes = [
@@ -1756,21 +2746,23 @@ class MainWindow(QMainWindow):
             if track.status in (STATUS_PENDING, STATUS_ERROR, STATUS_SKIPPED)
         ]
         if not downloadable_indexes:
-            QMessageBox.information(self, "Старт", "Нет Spotify-треков, ожидающих загрузку.")
+            QMessageBox.information(
+                self, "Старт", "Нет YouTube-треков, ожидающих загрузку."
+            )
             return
 
         self.ensure_elenveil_directories()
         self.start_button.setEnabled(False)
         self.create_playlist_button.setEnabled(False)
-        self.active_spotify_playlist_index = self.selected_playlist_index
+        self.active_remote_playlist_index = self.selected_playlist_index
         playlist.is_downloading = True
         self.playlist_item_widgets[self.selected_playlist_index].set_loading(True)
 
-        worker = SpotDLDownloadWorker(
+        worker = YouTubePlaylistDownloadWorker(
             [
                 (
                     index,
-                    playlist.tracks[index].spotify_url,
+                    playlist.tracks[index].source_url,
                     playlist.tracks[index].title,
                     playlist.tracks[index].artists,
                     playlist.tracks[index].album,
@@ -1778,48 +2770,47 @@ class MainWindow(QMainWindow):
                 for index in downloadable_indexes
             ],
             self.music_library_dir,
-            self.spotify_credentials.get("client_id", ""),
-            self.spotify_credentials.get("client_secret", ""),
             self.ffmpeg_location,
         )
         thread = QThread(self)
-        self.spotify_download_worker = worker
-        self.spotify_download_thread = thread
+        self.youtube_download_worker = worker
+        self.youtube_download_thread = thread
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.track_started.connect(self.on_spotify_track_download_started)
-        worker.track_finished.connect(self.on_spotify_track_download_finished)
-        worker.failed.connect(self.on_spotify_track_download_failed)
+        worker.track_started.connect(self.on_remote_track_download_started)
+        worker.track_finished.connect(self.on_remote_track_download_finished)
+        worker.failed.connect(self.on_youtube_track_download_failed)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self.on_spotify_track_downloads_finished)
+        thread.finished.connect(self.on_youtube_track_downloads_finished)
         thread.start()
 
-    def on_spotify_track_download_started(self, track_index: int) -> None:
-        if self.active_spotify_playlist_index is None:
+    def on_remote_track_download_started(self, track_index: int) -> None:
+        if self.active_remote_playlist_index is None:
             return
-        playlist = self.playlists[self.active_spotify_playlist_index]
+        playlist = self.playlists[self.active_remote_playlist_index]
         if not (0 <= track_index < len(playlist.tracks)):
             return
         track = playlist.tracks[track_index]
         track.status = STATUS_DOWNLOADING
         track.progress = 0.0
         track.error = ""
-        self.persist_playlist(self.active_spotify_playlist_index)
+        self.persist_playlist(self.active_remote_playlist_index)
+        self.update_playlist_item_status(self.active_remote_playlist_index)
         self.refresh_experimental_source_view()
         self.update_start_button_state()
 
-    def on_spotify_track_download_finished(
+    def on_remote_track_download_finished(
         self,
         track_index: int,
         status: str,
         local_file_path: str,
         error_text: str,
     ) -> None:
-        if self.active_spotify_playlist_index is None:
+        if self.active_remote_playlist_index is None:
             return
-        playlist = self.playlists[self.active_spotify_playlist_index]
+        playlist = self.playlists[self.active_remote_playlist_index]
         if not (0 <= track_index < len(playlist.tracks)):
             return
         track = playlist.tracks[track_index]
@@ -1827,41 +2818,59 @@ class MainWindow(QMainWindow):
         track.progress = 100.0 if status == STATUS_DONE else 0.0
         track.local_file_path = local_file_path
         track.error = error_text
-        self.persist_playlist(self.active_spotify_playlist_index)
+        self.persist_playlist(self.active_remote_playlist_index)
+        self.update_playlist_item_status(self.active_remote_playlist_index)
         self.refresh_experimental_source_view()
         self.update_start_button_state()
 
-    def on_spotify_track_download_failed(self, error_text: str) -> None:
+    def on_youtube_track_download_failed(self, error_text: str) -> None:
         QMessageBox.warning(
             self,
-            "spotdl",
-            error_text or "Не удалось запустить загрузку Spotify-треков через spotdl.",
+            "YouTube",
+            error_text or "Не удалось запустить загрузку YouTube-треков.",
         )
         self.update_start_button_state()
 
-    def on_spotify_track_downloads_finished(self) -> None:
+    def on_youtube_track_downloads_finished(self) -> None:
         summary_playlist = None
-        if self.active_spotify_playlist_index is not None and 0 <= self.active_spotify_playlist_index < len(self.playlists):
-            summary_playlist = self.playlists[self.active_spotify_playlist_index]
+        if (
+            self.active_remote_playlist_index is not None
+            and 0 <= self.active_remote_playlist_index < len(self.playlists)
+        ):
+            summary_playlist = self.playlists[self.active_remote_playlist_index]
             summary_playlist.is_downloading = False
-            self.playlist_item_widgets[self.active_spotify_playlist_index].set_loading(False)
-            self.persist_playlist(self.active_spotify_playlist_index)
-        self.spotify_download_thread = None
-        self.spotify_download_worker = None
-        self.active_spotify_playlist_index = None
+            self.update_playlist_item_status(self.active_remote_playlist_index)
+            self.persist_playlist(self.active_remote_playlist_index)
+            try:
+                self.export_remote_playlist_m3u8(summary_playlist)
+            except Exception as error:
+                QMessageBox.warning(
+                    self,
+                    "Плейлист",
+                    f"Не удалось обновить .m3u8 для плейлиста '{summary_playlist.name}'.\n\n{error}",
+                )
+        self.youtube_download_thread = None
+        self.youtube_download_worker = None
+        self.active_remote_playlist_index = None
         self.create_playlist_button.setEnabled(True)
         self.start_button.setEnabled(True)
         self.refresh_local_music_tracks()
         self.refresh_experimental_source_view()
         self.update_start_button_state()
         if summary_playlist is not None:
-            downloaded = sum(1 for track in summary_playlist.tracks if track.status == STATUS_DONE)
-            skipped = sum(1 for track in summary_playlist.tracks if track.status == STATUS_SKIPPED)
-            failed = sum(1 for track in summary_playlist.tracks if track.status == STATUS_ERROR)
+            downloaded = sum(
+                1 for track in summary_playlist.tracks if track.status == STATUS_DONE
+            )
+            skipped = sum(
+                1 for track in summary_playlist.tracks if track.status == STATUS_SKIPPED
+            )
+            failed = sum(
+                1 for track in summary_playlist.tracks if track.status == STATUS_ERROR
+            )
             if skipped or failed:
                 QMessageBox.information(
                     self,
-                    "spotdl",
+                    "YouTube",
                     f"Загрузка плейлиста завершена.\n\n"
                     f"Загружено: {downloaded}\n"
                     f"Пропущено: {skipped}\n"
@@ -1870,13 +2879,19 @@ class MainWindow(QMainWindow):
 
     def start_next_download(self) -> None:
         next_index = next(
-            (index for index, task in enumerate(self.tasks) if task.status == STATUS_PENDING),
+            (
+                index
+                for index, task in enumerate(self.tasks)
+                if task.status == STATUS_PENDING
+            ),
             None,
         )
         if next_index is None:
             self.active_download_index = None
             self.download_thread = None
-            self.start_button.setEnabled(any(task.status == STATUS_PENDING for task in self.tasks))
+            self.start_button.setEnabled(
+                any(task.status == STATUS_PENDING for task in self.tasks)
+            )
             return
 
         task = self.tasks[next_index]
@@ -1886,6 +2901,13 @@ class MainWindow(QMainWindow):
             "album_artist": task.meta_group,
             "album": task.meta_album,
         }
+        output_template = build_music_output_template(
+            self.output_dir,
+            title=task.meta_title or task.title,
+            artist=task.meta_author,
+            album=task.meta_album,
+            separator=" - ",
+        )
         worker = DownloadWorker(
             next_index,
             task.url,
@@ -1893,6 +2915,7 @@ class MainWindow(QMainWindow):
             metadata_overrides,
             task.meta_cover_path,
             self.ffmpeg_location,
+            output_template=output_template,
         )
         thread = QThread(self)
         self.download_worker = worker
@@ -1952,8 +2975,10 @@ class MainWindow(QMainWindow):
             widget.tick_animation()
         for card in self.cards:
             card.tick_status_icon_animation()
-        for card in self.spotify_track_cards:
+        for card in self.remote_track_cards:
             card.tick_status_icon_animation()
 
     def refresh_card(self, index: int, pulse: bool = False) -> None:
-        self.cards[index].update_from_task(self.tasks[index], pulse and self.animation_phase)
+        self.cards[index].update_from_task(
+            self.tasks[index], pulse and self.animation_phase
+        )

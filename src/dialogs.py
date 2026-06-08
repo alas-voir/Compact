@@ -1,5 +1,4 @@
 import os
-import re
 
 from PyQt6.QtCore import QSize, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QIcon, QPixmap
@@ -19,6 +18,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .models import DownloadTask
+from .music_paths import build_music_output_template
 from .widgets import DownloadCard
 from .workers import DownloadWorker, MetadataWorker
 
@@ -112,8 +112,8 @@ class MetadataDialog(QDialog):
         form.setHorizontalSpacing(14)
         form.setVerticalSpacing(16)
         self.url_edit = QLineEdit(task.url)
-        self.title_edit = QLineEdit(task.meta_title)
-        self.author_edit = QLineEdit(task.meta_author)
+        self.title_edit = QLineEdit(task.meta_title or task.title)
+        self.author_edit = QLineEdit(task.meta_author or task.channel)
         self.group_edit = QLineEdit(task.meta_group)
         self.album_edit = QLineEdit(task.meta_album)
         for line_edit in [
@@ -147,6 +147,9 @@ class MetadataDialog(QDialog):
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
+        ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        if ok_button is not None:
+            ok_button.setText("Сохранить")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
@@ -199,65 +202,6 @@ class MetadataDialog(QDialog):
             "album": self.album_edit.text().strip(),
         }
         return values, self.cover_path, self.cover_mode
-
-
-class SpotifyCredentialsDialog(QDialog):
-    def __init__(
-        self, parent: QWidget, client_id: str = "", client_secret: str = ""
-    ) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Настройки Spotify")
-        self.resize(640, 220)
-        self.setMinimumWidth(640)
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(18, 18, 18, 18)
-        root.setSpacing(14)
-
-        description = QLabel(
-            "Введите Spotify Client ID и Client Secret для чтения публичных Spotify-плейлистов."
-        )
-        description.setWordWrap(True)
-        description.setStyleSheet("font-size:13px; color:#eef2f7;")
-        root.addWidget(description)
-
-        form = QFormLayout()
-        form.setLabelAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
-        form.setFormAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-        )
-        form.setHorizontalSpacing(14)
-        form.setVerticalSpacing(14)
-
-        self.client_id_edit = QLineEdit(client_id)
-        self.client_secret_edit = QLineEdit(client_secret)
-        self.client_secret_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.client_id_edit.setMinimumWidth(380)
-        self.client_secret_edit.setMinimumWidth(380)
-        self.client_id_edit.setPlaceholderText("Spotify Client ID")
-        self.client_secret_edit.setPlaceholderText("Spotify Client Secret")
-
-        form.addRow("Client ID:", self.client_id_edit)
-        form.addRow("Client Secret:", self.client_secret_edit)
-
-        form_widget = QWidget()
-        form_widget.setLayout(form)
-        root.addWidget(form_widget)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
-
-    def get_values(self) -> tuple[str, str]:
-        return (
-            self.client_id_edit.text().strip(),
-            self.client_secret_edit.text().strip(),
-        )
 
 
 class ExperimentalImportDialog(QDialog):
@@ -510,9 +454,12 @@ class ExperimentalImportDialog(QDialog):
             "album_artist": task.meta_group,
             "album": task.meta_album,
         }
-        output_template = os.path.join(
+        output_template = build_music_output_template(
             self.output_dir,
-            f"{self._sanitize_filename_part(task.meta_author or task.channel)} – {self._sanitize_filename_part(task.meta_title or task.title)}.%(ext)s",
+            title=task.meta_title or task.title,
+            artist=task.meta_author,
+            album=task.meta_album,
+            separator=" - ",
         )
         worker = DownloadWorker(
             index,
@@ -596,9 +543,3 @@ class ExperimentalImportDialog(QDialog):
             event.ignore()
             return
         super().closeEvent(event)
-
-    def _sanitize_filename_part(self, value: str) -> str:
-        text = (value or "").strip() or "Неизвестно"
-        text = re.sub(r'[<>:"/\\\\|?*]+', "_", text)
-        text = re.sub(r"\\s+", " ", text).strip()
-        return text.rstrip(".") or "Неизвестно"

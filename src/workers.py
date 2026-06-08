@@ -7,9 +7,9 @@ from pathlib import Path
 import yt_dlp
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from .models import STATUS_DONE, STATUS_ERROR, STATUS_SKIPPED
-from .paths import config_path, resource_path
-from .spotify_reader import SpotifyPlaylistReader
+from .music_paths import build_music_output_template
+from .models import PlaylistEntry, RemoteTrack, STATUS_DONE, STATUS_ERROR, STATUS_SKIPPED
+from .paths import resource_path
 
 
 def is_working_ffmpeg_dir(directory: str) -> bool:
@@ -141,29 +141,97 @@ class MetadataWorker(QObject):
         self.finished.emit()
 
 
-class SpotifyPlaylistWorker(QObject):
+class YouTubePlaylistWorker(QObject):
     playlist_ready = pyqtSignal(object)
+    playlist_progress = pyqtSignal(int, int)
     failed = pyqtSignal(str)
     finished = pyqtSignal()
 
-    def __init__(self, playlist_url: str, client_id: str, client_secret: str) -> None:
+    def __init__(self, playlist_url: str) -> None:
         super().__init__()
         self.playlist_url = playlist_url
-        self.client_id = client_id
-        self.client_secret = client_secret
 
     def run(self) -> None:
         try:
-            reader = SpotifyPlaylistReader(self.client_id, self.client_secret)
-            playlist = reader.read_playlist(self.playlist_url)
+            options = {
+                "quiet": True,
+                "no_warnings": True,
+                "skip_download": True,
+                "extract_flat": "in_playlist",
+            }
+            with yt_dlp.YoutubeDL(options) as ydl:
+                info = ydl.extract_info(self.playlist_url, download=False)
+
+            entries = info.get("entries") or []
+            if not entries and isinstance(info, dict):
+                entries = [info]
+            tracks: list[RemoteTrack] = []
+            total_tracks = len(entries)
+            if total_tracks > 0:
+                self.playlist_progress.emit(0, total_tracks)
+            for index, entry in enumerate(entries, start=1):
+                if not isinstance(entry, dict):
+                    if total_tracks > 0:
+                        self.playlist_progress.emit(index, total_tracks)
+                    continue
+                title = (entry.get("track") or entry.get("title") or "Без названия").strip()
+                artists = (
+                    entry.get("artist")
+                    or entry.get("uploader")
+                    or entry.get("channel")
+                    or entry.get("creator")
+                    or "Неизвестный автор"
+                ).strip()
+                album = (entry.get("album") or "").strip()
+                track_url = (
+                    entry.get("webpage_url")
+                    or entry.get("url")
+                    or ""
+                ).strip()
+                if track_url and not track_url.startswith("http"):
+                    track_url = f"https://www.youtube.com/watch?v={track_url}"
+                thumbnail_url = (entry.get("thumbnail") or "").strip()
+                if not thumbnail_url:
+                    thumbnails = entry.get("thumbnails") or []
+                    if isinstance(thumbnails, list) and thumbnails:
+                        thumbnail_url = str((thumbnails[-1] or {}).get("url") or "").strip()
+                thumbnail_data = self._load_thumbnail(thumbnail_url)
+                tracks.append(
+                    RemoteTrack(
+                        title=title,
+                        artists=artists,
+                        album=album,
+                        source_url=track_url,
+                        thumbnail_data=thumbnail_data,
+                    )
+                )
+                if total_tracks > 0:
+                    self.playlist_progress.emit(index, total_tracks)
+
+            playlist = PlaylistEntry(
+                name=(info.get("title") or "YouTube Playlist").strip(),
+                source="youtube",
+                source_url=self.playlist_url.strip(),
+                tracks=tracks,
+                note="" if tracks else "YouTube не вернул треки для этого плейлиста.",
+            )
             self.playlist_ready.emit(playlist)
         except Exception as exc:
             self.failed.emit(str(exc))
         finally:
             self.finished.emit()
 
+    def _load_thumbnail(self, thumbnail_url: str) -> bytes | None:
+        if not thumbnail_url:
+            return None
+        try:
+            with urllib.request.urlopen(thumbnail_url, timeout=15) as response:
+                return response.read()
+        except Exception:
+            return None
 
-class SpotDLDownloadWorker(QObject):
+
+class YouTubePlaylistDownloadWorker(QObject):
     track_started = pyqtSignal(int)
     track_finished = pyqtSignal(int, str, str, str)
     failed = pyqtSignal(str)
@@ -173,138 +241,65 @@ class SpotDLDownloadWorker(QObject):
         self,
         track_payloads: list[tuple[int, str, str, str, str]],
         output_dir: str,
-        client_id: str,
-        client_secret: str,
         ffmpeg_location: str = "",
     ) -> None:
         super().__init__()
         self.track_payloads = track_payloads
         self.output_dir = output_dir
-        self.client_id = client_id
-        self.client_secret = client_secret
         self.ffmpeg_location = ffmpeg_location
 
     def run(self) -> None:
-        original_path = os.environ.get("PATH", "")
         try:
-            try:
-                from spotdl import Spotdl
-                from spotdl.types.song import Song
-            except Exception as exc:
-                raise RuntimeError(
-                    "spotdl не установлен. Обновите зависимости приложения (`pip install -r requirements.txt`)."
-                ) from exc
-
-            ffmpeg_dir = resolve_ffmpeg_directory(self.ffmpeg_location)
-            ffmpeg_binary = resolve_ffmpeg_binary(ffmpeg_dir)
-            if ffmpeg_dir:
-                os.environ["PATH"] = f"{ffmpeg_dir}:{original_path}" if original_path else ffmpeg_dir
-            spotdl_cache_dir = Path(config_path("spotdl-cache"))
-            spotdl_cache_dir.mkdir(parents=True, exist_ok=True)
-
-            downloader_settings = {
-                "output": os.path.join(self.output_dir, "{artists} - {title}.{output-ext}"),
-                "format": "mp3",
-                "threads": 1,
-                "overwrite": "skip",
-                "scan_for_songs": True,
-                "ffmpeg": ffmpeg_binary,
-            }
-            spotdl_client = Spotdl(
-                client_id=self.client_id,
-                client_secret=self.client_secret,
-                use_official_api=True,
-                cache_path=str(spotdl_cache_dir),
-                downloader_settings=downloader_settings,
-            )
-
-            for index, spotify_url, title, artists_text, album_name in self.track_payloads:
+            for index, track_url, title, artists_text, album_name in self.track_payloads:
                 self.track_started.emit(index)
-                if not spotify_url.strip():
-                    self.track_finished.emit(index, STATUS_SKIPPED, "", "Пустая ссылка Spotify.")
+                if not track_url.strip():
+                    self.track_finished.emit(index, STATUS_SKIPPED, "", "Пустая ссылка YouTube.")
                     continue
 
-                try:
-                    known_error_count = len(getattr(spotdl_client.downloader, "errors", []))
-                    song = self._build_spotdl_song(Song, spotify_url, title, artists_text, album_name)
-                    _, downloaded_path = spotdl_client.download(song)
-                    new_errors = getattr(spotdl_client.downloader, "errors", [])[known_error_count:]
-                    if downloaded_path:
-                        self.track_finished.emit(index, STATUS_DONE, str(Path(downloaded_path)), "")
-                        continue
+                output_template = build_music_output_template(
+                    self.output_dir,
+                    title=title,
+                    artist=artists_text,
+                    album=album_name,
+                    separator=" - ",
+                )
+                worker = DownloadWorker(
+                    index,
+                    track_url,
+                    self.output_dir,
+                    {
+                        "title": title,
+                        "artist": artists_text,
+                        "album_artist": "",
+                        "album": album_name,
+                    },
+                    "",
+                    self.ffmpeg_location,
+                    output_template=output_template,
+                )
+                result: dict[str, object] = {"success": False, "error": ""}
 
-                    error_text = (
-                        new_errors[-1]
-                        if new_errors
-                        else "spotdl пропустил трек: не найден подходящий источник для скачивания."
+                def capture_finished(_index: int, success: bool, error_text: str) -> None:
+                    result["success"] = success
+                    result["error"] = error_text
+
+                worker.finished.connect(capture_finished)
+                worker.run()
+
+                if bool(result["success"]):
+                    local_file_path = output_template.replace("%(ext)s", "mp3")
+                    self.track_finished.emit(index, STATUS_DONE, local_file_path, "")
+                else:
+                    self.track_finished.emit(
+                        index,
+                        STATUS_ERROR,
+                        "",
+                        str(result["error"] or "Не удалось загрузить трек YouTube."),
                     )
-                    self.track_finished.emit(index, STATUS_SKIPPED, "", error_text)
-                except Exception as exc:
-                    error_text = str(exc)
-                    self.track_finished.emit(index, STATUS_ERROR, "", error_text)
-                    if self._is_rate_limit_error(error_text):
-                        raise RuntimeError(
-                            "spotdl остановлен из-за лимита запросов Spotify. "
-                            "Повторите позже или используйте уже импортированные метаданные без повторного запроса."
-                        ) from exc
         except Exception as exc:
             self.failed.emit(str(exc))
         finally:
-            os.environ["PATH"] = original_path
             self.finished.emit()
-
-    def _build_spotdl_song(
-        self,
-        song_type,
-        spotify_url: str,
-        title: str,
-        artists_text: str,
-        album_name: str,
-    ):
-        artist_names = [name.strip() for name in artists_text.split(",") if name.strip()]
-        primary_artist = artist_names[0] if artist_names else "Unknown Artist"
-        track_id = self._extract_track_id(spotify_url)
-        return song_type.from_missing_data(
-            name=title.strip() or "Unknown Title",
-            artists=artist_names or [primary_artist],
-            artist=primary_artist,
-            album_name=album_name.strip() or None,
-            album_artist=primary_artist,
-            url=spotify_url,
-            song_id=track_id or None,
-            album_id=None,
-            artist_id=None,
-            cover_url=None,
-            duration=None,
-            year=None,
-            date=None,
-            track_number=None,
-            tracks_count=None,
-            disc_number=None,
-            disc_count=None,
-            genres=[],
-            isrc=None,
-            explicit=None,
-            publisher=None,
-            copyright_text=None,
-            album_type=None,
-        )
-
-    def _extract_track_id(self, spotify_url: str) -> str:
-        marker = "/track/"
-        if marker not in spotify_url:
-            return ""
-        track_id = spotify_url.split(marker, 1)[1].split("?", 1)[0].split("/", 1)[0].strip()
-        return track_id
-
-    def _is_rate_limit_error(self, error_text: str) -> bool:
-        lowered = error_text.lower()
-        return (
-            "rate/request limit" in lowered
-            or "retry will occur after" in lowered
-            or "http status: 429" in lowered
-            or "status code: 429" in lowered
-        )
 
 
 class DownloadWorker(QObject):
@@ -344,7 +339,16 @@ class DownloadWorker(QObject):
 
     def run(self) -> None:
         self.started.emit(self.index)
-        output_template = self.output_template or os.path.join(self.output_dir, "%(title)s.%(ext)s")
+        output_template = self.output_template or build_music_output_template(
+            self.output_dir,
+            title=self.metadata_overrides.get("title") or "%(title)s",
+            artist=self.metadata_overrides.get("artist", ""),
+            album=self.metadata_overrides.get("album", ""),
+            separator=" - ",
+        )
+        output_dirname = os.path.dirname(output_template)
+        if output_dirname:
+            os.makedirs(output_dirname, exist_ok=True)
         ffmpeg_dir = self._resolve_ffmpeg_directory()
         ffmpeg_location = ffmpeg_dir
         ffmpeg_binary = self._resolve_ffmpeg_binary(ffmpeg_dir)

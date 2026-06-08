@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
 from .models import (
     LocalMusicTrack,
     PlaylistEntry,
-    SpotifyTrack,
+    RemoteTrack,
     STATUS_DONE,
     STATUS_DOWNLOADING,
     STATUS_ERROR,
@@ -30,6 +30,8 @@ class ToggleSwitch(QCheckBox):
         super().__init__(parent)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedSize(42, 24)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
 
     def sizeHint(self) -> QSize:
         return QSize(42, 24)
@@ -171,14 +173,15 @@ class PlaylistListItemWidget(QFrame):
         super().mousePressEvent(event)
 
 
-class SpotifyTrackCard(QFrame):
-    selected = pyqtSignal(int)
+class RemoteTrackCard(QFrame):
+    selected = pyqtSignal(int, int)
+    context_requested = pyqtSignal(int, object)
     delete_requested = pyqtSignal(int)
     metadata_requested = pyqtSignal(int)
 
     def __init__(
         self,
-        track: SpotifyTrack | LocalMusicTrack,
+        track: RemoteTrack | LocalMusicTrack,
         track_index: int,
         status_icons: dict[str, QIcon],
         metadata_icon: QIcon,
@@ -189,7 +192,7 @@ class SpotifyTrackCard(QFrame):
         self.status_icons = status_icons
         self.current_status = STATUS_PENDING
         self.status_rotation_angle = 0
-        self.setObjectName("spotify_card")
+        self.setObjectName("remote_track_card")
         self.setFixedHeight(108)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.update_card_style()
@@ -282,7 +285,7 @@ class SpotifyTrackCard(QFrame):
         self.update_from_track(track)
         self.position_overlay_controls()
 
-    def update_from_track(self, track: SpotifyTrack | LocalMusicTrack) -> None:
+    def update_from_track(self, track: RemoteTrack | LocalMusicTrack) -> None:
         self.title_label.setText(track.title)
         self.artist_label.setText(track.artists)
         self.album_label.setText(track.album or "Без альбома")
@@ -309,7 +312,7 @@ class SpotifyTrackCard(QFrame):
     def update_card_style(self) -> None:
         border_color = "#5f9ee6" if self.is_selected else "#3a3f48"
         self.setStyleSheet(
-            f"#spotify_card {{ background:#2a2d33; border:1px solid {border_color}; border-radius:10px; }}"
+            f"#remote_track_card {{ background:#2a2d33; border:1px solid {border_color}; border-radius:10px; }}"
         )
 
     def set_status_icons(self, status_icons: dict[str, QIcon]) -> None:
@@ -355,7 +358,9 @@ class SpotifyTrackCard(QFrame):
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            self.selected.emit(self.track_index)
+            self.selected.emit(self.track_index, int(event.modifiers().value))
+        elif event.button() == Qt.MouseButton.RightButton:
+            self.context_requested.emit(self.track_index, event.globalPosition().toPoint())
         super().mousePressEvent(event)
 
     def resizeEvent(self, event) -> None:

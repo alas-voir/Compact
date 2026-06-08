@@ -25,11 +25,11 @@ class DownloadTask:
 
 
 @dataclass
-class SpotifyTrack:
+class RemoteTrack:
     title: str
     artists: str
     album: str
-    spotify_url: str
+    source_url: str
     thumbnail_data: bytes | None = None
     status: str = STATUS_PENDING
     progress: float = 0.0
@@ -55,7 +55,9 @@ class PlaylistEntry:
     name: str
     source: str
     source_url: str
-    tracks: list[SpotifyTrack | LocalMusicTrack] = field(default_factory=list)
+    tracks: list[RemoteTrack | LocalMusicTrack] = field(default_factory=list)
     is_loading: bool = False
     note: str = ""
     is_downloading: bool = False
+    loading_current: int = 0
+    loading_total: int = 0
