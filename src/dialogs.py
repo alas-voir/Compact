@@ -275,13 +275,54 @@ class ExperimentalImportDialog(QDialog):
 
         for index, task in enumerate(self.tasks):
             card = DownloadCard(task, index, self.metadata_icon, self.status_icons)
+            card.apply_theme(self.is_dark_theme())
             card.metadata_requested.connect(self.on_card_metadata_requested)
             card.delete_requested.connect(self.on_card_delete_requested)
             card.selected.connect(self.on_card_selected)
             self.cards.append(card)
             self.cards_layout.addWidget(card)
 
+        self.apply_theme()
         self.start_metadata_load()
+
+    def is_dark_theme(self) -> bool:
+        return self.palette().color(self.backgroundRole()).lightness() < 128
+
+    def apply_theme(self) -> None:
+        is_dark = self.is_dark_theme()
+        if is_dark:
+            button_bg = "#2e3136"
+            button_hover = "#373b43"
+            button_border = "#3b3f46"
+            button_disabled_bg = "#2a2d33"
+            button_disabled_border = "#353941"
+            button_disabled_text = "#8b93a0"
+        else:
+            button_bg = "#f3f5f8"
+            button_hover = "#e8edf4"
+            button_border = "#cfd7e3"
+            button_disabled_bg = "#eef2f6"
+            button_disabled_border = "#d9e0ea"
+            button_disabled_text = "#8f98a6"
+        self.scroll_area.setStyleSheet(
+            "QScrollArea { background:transparent; border:none; }"
+        )
+        self.cards_container.setStyleSheet("background:transparent; border:none;")
+        self.start_button.setStyleSheet(
+            "QPushButton {"
+            f"background:{button_bg};"
+            f"border:1px solid {button_border};"
+            "border-radius:10px;"
+            "color:palette(button-text);"
+            "font-size:13px;"
+            "font-weight:700;"
+            "padding:0 18px; }"
+            f"QPushButton:hover {{ background:{button_hover}; }}"
+            "QPushButton:disabled {"
+            f"background:{button_disabled_bg};"
+            f"border-color:{button_disabled_border};"
+            f"color:{button_disabled_text}; }}"
+        )
 
     def animate_cards(self) -> None:
         for card in self.cards:

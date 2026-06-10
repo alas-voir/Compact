@@ -32,12 +32,17 @@ class ToggleSwitch(QCheckBox):
         self.setFixedSize(42, 24)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
+        self.dark_theme = True
 
     def sizeHint(self) -> QSize:
         return QSize(42, 24)
 
     def hitButton(self, pos) -> bool:
         return self.rect().contains(pos)
+
+    def set_dark_theme(self, is_dark: bool) -> None:
+        self.dark_theme = is_dark
+        self.update()
 
     def paintEvent(self, event) -> None:
         del event
@@ -46,8 +51,12 @@ class ToggleSwitch(QCheckBox):
 
         track_rect = self.rect().adjusted(1, 3, -1, -3)
         radius = track_rect.height() / 2
-        track_color = QColor("#5f9ee6") if self.isChecked() else QColor("#454b55")
-        knob_color = QColor("#f2f5fa")
+        if self.dark_theme:
+            track_color = QColor("#5f9ee6") if self.isChecked() else QColor("#454b55")
+            knob_color = QColor("#f2f5fa")
+        else:
+            track_color = QColor("#4e88d9") if self.isChecked() else QColor("#b8c0cc")
+            knob_color = QColor("#ffffff")
 
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(track_color)
@@ -72,6 +81,7 @@ class PlaylistListItemWidget(QFrame):
         self.rotation_angle = 0
         self.is_loading = False
         self.is_selected = False
+        self.dark_theme = True
         self.setObjectName("playlist_item")
         self.setFixedHeight(44)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -110,7 +120,7 @@ class PlaylistListItemWidget(QFrame):
         self.delete_button.clicked.connect(self.delete_requested.emit)
         layout.addWidget(self.delete_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
 
-        self.update_style()
+        self.apply_theme(True)
         self.set_loading(False)
 
     def set_title(self, title: str) -> None:
@@ -134,9 +144,32 @@ class PlaylistListItemWidget(QFrame):
         self.is_selected = is_selected
         self.update_style()
 
+    def apply_theme(self, is_dark: bool) -> None:
+        self.dark_theme = is_dark
+        title_color = "#eef2f7" if is_dark else "#1e2630"
+        self.title_label.setStyleSheet(
+            f"font-size:13px; font-weight:700; color:{title_color}; background:transparent; border:none;"
+        )
+        self.delete_button.setStyleSheet(
+            "QToolButton {"
+            "background:transparent;"
+            "color:#ff4d5a;"
+            "border:none;"
+            "font-size:14px;"
+            "font-weight:700;"
+            "padding:0;"
+            "}"
+            "QToolButton:hover { color:#ff6570; }"
+        )
+        self.update_style()
+
     def update_style(self) -> None:
-        background = "#355680" if self.is_selected else "#252a31"
-        border = "#4b74a7" if self.is_selected else "#30353d"
+        if self.dark_theme:
+            background = "#355680" if self.is_selected else "#252a31"
+            border = "#4b74a7" if self.is_selected else "#30353d"
+        else:
+            background = "#d9e8fb" if self.is_selected else "#ffffff"
+            border = "#6e99d8" if self.is_selected else "#d0d7e2"
         self.setStyleSheet(
             f"#playlist_item {{ background:{background}; border:1px solid {border}; border-radius:8px; }}"
         )
@@ -192,10 +225,10 @@ class RemoteTrackCard(QFrame):
         self.status_icons = status_icons
         self.current_status = STATUS_PENDING
         self.status_rotation_angle = 0
+        self.dark_theme = True
         self.setObjectName("remote_track_card")
         self.setFixedHeight(108)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        self.update_card_style()
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
@@ -282,6 +315,7 @@ class RemoteTrackCard(QFrame):
         self.metadata_button.clicked.connect(lambda: self.metadata_requested.emit(self.track_index))
         self.metadata_button.setParent(self)
 
+        self.apply_theme(True)
         self.update_from_track(track)
         self.position_overlay_controls()
 
@@ -309,10 +343,61 @@ class RemoteTrackCard(QFrame):
         self.is_selected = is_selected
         self.update_card_style()
 
+    def apply_theme(self, is_dark: bool) -> None:
+        self.dark_theme = is_dark
+        primary = "#eef2f7" if is_dark else "#1e2630"
+        secondary = "#b4bcc9" if is_dark else "#556170"
+        tertiary = "#8f98a6" if is_dark else "#788292"
+        preview_bg = "#303236" if is_dark else "#e5eaf0"
+        preview_fg = "#aeb4bf" if is_dark else "#6d7785"
+        metadata_bg = "#32363d" if is_dark else "#eef2f6"
+        metadata_border = "#4a515c" if is_dark else "#c8d0dc"
+        metadata_hover = "#3b414b" if is_dark else "#e3e8ef"
+        self.position_label.setStyleSheet(
+            f"font-size:13px; font-weight:700; color:{tertiary}; background:transparent; border:none;"
+        )
+        self.preview_label.setStyleSheet(
+            f"background:{preview_bg}; color:{preview_fg}; border-radius:8px; font-size:11px;"
+        )
+        self.title_label.setStyleSheet(
+            f"font-size:14px; font-weight:700; color:{primary}; background:transparent; border:none;"
+        )
+        self.artist_label.setStyleSheet(
+            f"font-size:12px; color:{secondary}; background:transparent; border:none;"
+        )
+        self.album_label.setStyleSheet(
+            f"font-size:12px; color:{tertiary}; background:transparent; border:none;"
+        )
+        self.metadata_button.setStyleSheet(
+            "QToolButton {"
+            f"background:{metadata_bg};"
+            f"border:1px solid {metadata_border};"
+            "border-radius:7px;"
+            "}"
+            f"QToolButton:hover {{ background:{metadata_hover}; }}"
+        )
+        self.delete_button.setStyleSheet(
+            "QToolButton {"
+            "background:transparent;"
+            "color:#ff4d5a;"
+            "border:none;"
+            "font-size:15px;"
+            "font-weight:700;"
+            "padding:0;"
+            "}"
+            "QToolButton:hover { color:#ff6570; }"
+        )
+        self.update_card_style()
+
     def update_card_style(self) -> None:
-        border_color = "#5f9ee6" if self.is_selected else "#3a3f48"
+        if self.dark_theme:
+            background = "#2a2d33"
+            border_color = "#5f9ee6" if self.is_selected else "#3a3f48"
+        else:
+            background = "#ffffff"
+            border_color = "#6e99d8" if self.is_selected else "#d0d7e2"
         self.setStyleSheet(
-            f"#remote_track_card {{ background:#2a2d33; border:1px solid {border_color}; border-radius:10px; }}"
+            f"#remote_track_card {{ background:{background}; border:1px solid {border_color}; border-radius:10px; }}"
         )
 
     def set_status_icons(self, status_icons: dict[str, QIcon]) -> None:
@@ -397,11 +482,11 @@ class DownloadCard(QFrame):
         self.status_icons = status_icons
         self.status_rotation_angle = 0
         self.is_selected = False
+        self.dark_theme = True
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setObjectName("card")
         self.setFixedHeight(132)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        self.update_card_style()
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -514,6 +599,7 @@ class DownloadCard(QFrame):
         right_layout.addStretch(1)
         layout.addLayout(right_layout)
 
+        self.apply_theme(True)
         self.position_action_buttons()
         self.update_from_task(task, False)
 
@@ -560,10 +646,73 @@ class DownloadCard(QFrame):
         self.is_selected = is_selected
         self.update_card_style()
 
+    def apply_theme(self, is_dark: bool) -> None:
+        self.dark_theme = is_dark
+        primary = "#eef2f7" if is_dark else "#1e2630"
+        secondary = "#b4bcc9" if is_dark else "#556170"
+        tertiary = "#7f8794" if is_dark else "#788292"
+        preview_bg = "#303236" if is_dark else "#e5eaf0"
+        preview_fg = "#aeb4bf" if is_dark else "#6d7785"
+        button_bg = "#32363d" if is_dark else "#eef2f6"
+        button_border = "#4a515c" if is_dark else "#c8d0dc"
+        button_hover = "#3b414b" if is_dark else "#e3e8ef"
+        progress_bg = "#1f232a" if is_dark else "#eef2f6"
+        progress_border = "#3a404a" if is_dark else "#d0d7e2"
+        progress_text = "#eef2f7" if is_dark else "#1e2630"
+        self.position_label.setStyleSheet(
+            f"font-size:13px; font-weight:700; color:{tertiary}; background:transparent; border:none;"
+        )
+        self.preview_label.setStyleSheet(
+            f"background:{preview_bg}; color:{preview_fg}; border-radius:6px; font-size:11px;"
+        )
+        self.title_label.setStyleSheet(
+            f"font-size:15px; font-weight:700; color:{primary};"
+        )
+        self.channel_label.setStyleSheet(f"font-size:12px; color:{secondary};")
+        self.metadata_button.setStyleSheet(
+            "QToolButton {"
+            f"background:{button_bg};"
+            f"border:1px solid {button_border};"
+            "border-radius:7px;"
+            "}"
+            f"QToolButton:hover {{ background:{button_hover}; }}"
+        )
+        self.delete_button.setStyleSheet(
+            "QToolButton {"
+            "background:transparent;"
+            "color:#ff4d5a;"
+            "border:none;"
+            "font-size:15px;"
+            "font-weight:700;"
+            "padding:0;"
+            "}"
+            "QToolButton:hover { color:#ff6570; }"
+        )
+        self.progress_bar.setStyleSheet(
+            "QProgressBar {"
+            f"background:{progress_bg};"
+            f"border:1px solid {progress_border};"
+            "border-radius:9px;"
+            "text-align:center;"
+            f"color:{progress_text};"
+            "font-weight:700;"
+            "}"
+            "QProgressBar::chunk {"
+            "background:#5f9ee6;"
+            "border-radius:9px;"
+            "}"
+        )
+        self.update_card_style()
+
     def update_card_style(self) -> None:
-        border_color = "#5f9ee6" if self.is_selected else "#3a3f48"
+        if self.dark_theme:
+            background = "#2a2d33"
+            border_color = "#5f9ee6" if self.is_selected else "#3a3f48"
+        else:
+            background = "#ffffff"
+            border_color = "#6e99d8" if self.is_selected else "#d0d7e2"
         self.setStyleSheet(
-            f"#card {{ background:#2a2d33; border:1px solid {border_color}; border-radius:8px; }}"
+            f"#card {{ background:{background}; border:1px solid {border_color}; border-radius:8px; }}"
         )
 
     def set_list_index(self, list_index: int) -> None:
@@ -650,13 +799,7 @@ class AddCard(QFrame):
         super().__init__()
         self.setObjectName("add_card")
         self.setFixedHeight(110)
-        self.setStyleSheet(
-            "#add_card {"
-            "background: rgba(255, 255, 255, 0.02);"
-            "border: 1px dashed #4a515c;"
-            "border-radius: 8px;"
-            "}"
-        )
+        self.dark_theme = True
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
@@ -670,16 +813,42 @@ class AddCard(QFrame):
         self.plus_label = QLabel("+")
         self.plus_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.plus_label.setFixedSize(40, 40)
+        layout.addWidget(self.plus_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+        layout.addStretch(1)
+        self.apply_theme(True)
+
+    def apply_theme(self, is_dark: bool) -> None:
+        self.dark_theme = is_dark
+        if is_dark:
+            card_bg = "rgba(255, 255, 255, 0.02)"
+            card_border = "#4a515c"
+            text_color = "#b7bfcb"
+            plus_bg = "#262a31"
+            plus_border = "#5a6270"
+        else:
+            card_bg = "#f5f7fa"
+            card_border = "#c8d0dc"
+            text_color = "#667283"
+            plus_bg = "#ffffff"
+            plus_border = "#b7c1ce"
+        self.setStyleSheet(
+            "#add_card {"
+            f"background: {card_bg};"
+            f"border: 1px dashed {card_border};"
+            "border-radius: 8px;"
+            "}"
+        )
+        self.title_label.setStyleSheet(
+            f"font-size:14px; font-weight:700; color:{text_color};"
+        )
         self.plus_label.setStyleSheet(
-            "border:1px solid #5a6270;"
+            f"border:1px solid {plus_border};"
             "border-radius:8px;"
             "font-size:24px;"
             "font-weight:700;"
-            "color:#b7bfcb;"
-            "background:#262a31;"
+            f"color:{text_color};"
+            f"background:{plus_bg};"
         )
-        layout.addWidget(self.plus_label, alignment=Qt.AlignmentFlag.AlignHCenter)
-        layout.addStretch(1)
 
     def mousePressEvent(self, event) -> None:
         self.clicked.emit()

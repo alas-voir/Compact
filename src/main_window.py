@@ -26,7 +26,6 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QScrollArea,
     QSplitter,
-    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -69,7 +68,6 @@ from .widgets import (
     DownloadCard,
     PlaylistListItemWidget,
     RemoteTrackCard,
-    ToggleSwitch,
 )
 from .workers import (
     DownloadWorker,
@@ -83,7 +81,8 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Elenveil")
-        self.resize(640, 640)
+        self.resize(1180, 720)
+        self.startup_root_dir_warning = ""
 
         self.tasks: list[DownloadTask] = []
         self.cards: list[DownloadCard] = []
@@ -128,24 +127,19 @@ class MainWindow(QMainWindow):
         self.sort_field = "date"
         self.sort_ascending = False
         self.animation_phase = False
-        default_elenveil_root_dir = os.path.join(
-            os.path.expanduser("~"), "Music", "Elenveil"
-        )
+        default_elenveil_root_dir = self.default_elenveil_root_dir()
         self.elenveil_root_dir = ""
         self.music_library_dir = ""
         self.playlists_dir = ""
-        self.set_elenveil_root_dir(
-            load_elenveil_root_dir() or default_elenveil_root_dir, persist=False
+        self.initialize_elenveil_root_dir(
+            load_elenveil_root_dir() or default_elenveil_root_dir,
+            default_elenveil_root_dir,
         )
 
         root = QWidget()
         layout = QVBoxLayout(root)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
-
-        self.top_layout = QHBoxLayout()
-        self.top_layout.setContentsMargins(0, 0, 0, 0)
-        self.top_layout.setSpacing(8)
 
         self.select_elenveil_root_button = QPushButton()
         self.select_elenveil_root_button.setToolTip("Выбрать папку Elenveil")
@@ -213,23 +207,8 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(False)
         self.reload_theme_icons()
 
-        self.experimental_mode_toggle = ToggleSwitch()
-        self.experimental_mode_toggle.setChecked(False)
-        self.experimental_mode_toggle.setToolTip("Экспериментальный режим")
-        self.experimental_mode_toggle.toggled.connect(self.on_experimental_mode_toggled)
-        self.experimental_mode_label = QLabel("Экспериментальный режим")
-        self.experimental_mode_label.setStyleSheet("color:#b4bcc9; font-size:12px;")
-        experimental_layout = QHBoxLayout()
-        experimental_layout.setContentsMargins(0, 0, 0, 0)
-        experimental_layout.setSpacing(6)
-        experimental_layout.addWidget(self.experimental_mode_label)
-        experimental_layout.addWidget(self.experimental_mode_toggle)
-        self.experimental_mode_controls_widget = QWidget()
-        self.experimental_mode_controls_widget.setLayout(experimental_layout)
-
         self.ffmpeg_status_label = QLabel("FFmpeg: проверка...")
         self.ffmpeg_status_label.setStyleSheet("color:#b4bcc9; font-size:12px;")
-        layout.addLayout(self.top_layout)
 
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
@@ -243,12 +222,6 @@ class MainWindow(QMainWindow):
         self.cards_layout.addWidget(self.add_card)
         self.scroll_area.setWidget(self.cards_container)
 
-        self.content_stack = QStackedWidget()
-        self.normal_page = QWidget()
-        self.normal_page_layout = QVBoxLayout(self.normal_page)
-        self.normal_page_layout.setContentsMargins(0, 0, 0, 0)
-        self.normal_page_layout.setSpacing(0)
-
         self.experimental_page = QWidget()
         experimental_page_layout = QVBoxLayout(self.experimental_page)
         experimental_page_layout.setContentsMargins(0, 0, 0, 0)
@@ -259,8 +232,6 @@ class MainWindow(QMainWindow):
         self.experimental_footer_layout.setContentsMargins(8, 0, 8, 0)
         self.experimental_footer_layout.setSpacing(8)
         self.experimental_footer_widget.setLayout(self.experimental_footer_layout)
-        self.experimental_footer_left_spacer = QWidget()
-        self.experimental_footer_left_spacer.setFixedHeight(1)
 
         self.sort_date_button = self.create_text_header_button("")
         self.sort_title_button = self.create_text_header_button("")
@@ -358,17 +329,19 @@ class MainWindow(QMainWindow):
 
         experimental_page_layout.addWidget(self.experimental_splitter)
         experimental_page_layout.addWidget(self.experimental_footer_widget)
-        self.content_stack.addWidget(self.normal_page)
-        self.content_stack.addWidget(self.experimental_page)
-        layout.addWidget(self.content_stack)
+        layout.addWidget(self.experimental_page)
 
         self.setCentralWidget(root)
-        self.relocate_track_view(self.normal_page_layout)
         self.playlist_list.currentRowChanged.connect(self.on_playlist_selected)
         self.restore_persisted_playlists()
-        self.relayout_status_widgets(False)
+        self.relayout_status_widgets()
         self.update_metadata_panel()
-        self.apply_mode_state(False)
+        self.update_delete_files_checkbox_visibility()
+        self.update_start_button_state()
+        self.show_all_music()
+        self.apply_theme()
+        if self.startup_root_dir_warning:
+            QTimer.singleShot(0, self.show_startup_root_dir_warning)
 
         self.animation_timer = QTimer(self)
         self.animation_timer.setInterval(120)
@@ -379,6 +352,7 @@ class MainWindow(QMainWindow):
     def changeEvent(self, event) -> None:
         if event.type() == QEvent.Type.PaletteChange:
             self.reload_theme_icons()
+            self.apply_theme()
         super().changeEvent(event)
 
     def is_dark_theme(self) -> bool:
@@ -389,25 +363,58 @@ class MainWindow(QMainWindow):
 
     def themed_icon_path(self, base_name: str) -> str:
         suffix = "light" if self.is_dark_theme() else "dark"
-        return resource_path("assets", "icons", f"{base_name}_{suffix}.svg")
+        themed_path = resource_path("assets", "icons", f"{base_name}_{suffix}.svg")
+        if os.path.exists(themed_path):
+            return themed_path
+        return resource_path("assets", "icons", f"{base_name}.svg")
+
+    def theme_colors(self) -> dict[str, str]:
+        if self.is_dark_theme():
+            return {
+                "button_bg": "#2e3136",
+                "button_hover": "#373b43",
+                "button_border": "#3b3f46",
+                "button_disabled_bg": "#2a2d33",
+                "button_disabled_border": "#353941",
+                "button_disabled_text": "#8b93a0",
+                "panel_bg": "#1c2026",
+                "panel_border": "#343941",
+                "list_bg": "#20242a",
+                "text_primary": "#eef2f7",
+                "text_secondary": "#b4bcc9",
+                "text_muted": "#8f98a6",
+                "checkbox_bg": "#2e3136",
+                "checkbox_border": "#4a515c",
+                "checkbox_checked": "#5f9ee6",
+                "progress_bg": "#2a2d33",
+                "progress_border": "#3a3f48",
+                "footer_text": "#b4bcc9",
+            }
+        return {
+            "button_bg": "#eef2f6",
+            "button_hover": "#e4e9f0",
+            "button_border": "#cad2de",
+            "button_disabled_bg": "#f4f6f9",
+            "button_disabled_border": "#d8dee7",
+            "button_disabled_text": "#9aa4b2",
+            "panel_bg": "#f7f9fc",
+            "panel_border": "#d5dbe5",
+            "list_bg": "#f5f7fa",
+            "text_primary": "#1f2630",
+            "text_secondary": "#556170",
+            "text_muted": "#788292",
+            "checkbox_bg": "#ffffff",
+            "checkbox_border": "#b7c1ce",
+            "checkbox_checked": "#4e88d9",
+            "progress_bg": "#edf1f6",
+            "progress_border": "#d0d7e2",
+            "footer_text": "#556170",
+        }
 
     def create_text_header_button(self, text: str) -> QPushButton:
         button = QPushButton(text)
         button.setFixedHeight(36)
-        button.setStyleSheet(
-            "QPushButton {"
-            "background:#2e3136;"
-            "border:1px solid #3b3f46;"
-            "border-radius:8px;"
-            "padding:0 12px;"
-            "color:#eef2f7;"
-            "font-size:12px;"
-            "font-weight:600;"
-            "}"
-            "QPushButton:hover { background:#373b43; }"
-            "QPushButton:checked { background:#355680; border-color:#4b74a7; }"
-            "QPushButton:disabled { background:#2a2d33; border-color:#353941; color:#8b93a0; }"
-        )
+        self.apply_header_button_style(button)
         return button
 
     def create_section_panel(
@@ -417,9 +424,6 @@ class MainWindow(QMainWindow):
         right_header_widgets: list[QWidget] | None = None,
     ) -> tuple[QFrame, QVBoxLayout]:
         frame = QFrame()
-        frame.setStyleSheet(
-            "QFrame { background:#1c2026; border:1px solid #343941; border-radius:10px; }"
-        )
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
@@ -428,9 +432,7 @@ class MainWindow(QMainWindow):
         header_row.setContentsMargins(0, 0, 0, 0)
         header_row.setSpacing(8)
         title_label = QLabel(title)
-        title_label.setStyleSheet(
-            "font-size:14px; font-weight:700; color:#eef2f7; background:transparent; border:none;"
-        )
+        frame.section_title_label = title_label
         header_row.addWidget(title_label)
         for widget in left_header_widgets or []:
             header_row.addWidget(widget)
@@ -438,13 +440,125 @@ class MainWindow(QMainWindow):
         for widget in right_header_widgets or []:
             header_row.addWidget(widget)
         layout.addLayout(header_row)
+        self.apply_section_panel_style(frame)
         return frame, layout
 
-    def relocate_track_view(self, target_layout: QVBoxLayout) -> None:
-        current_parent = self.scroll_area.parentWidget()
-        if current_parent is not None:
-            self.scroll_area.setParent(None)
-        target_layout.addWidget(self.scroll_area)
+    def apply_header_button_style(self, button: QPushButton) -> None:
+        colors = self.theme_colors()
+        button.setStyleSheet(
+            "QPushButton {"
+            f"background:{colors['button_bg']};"
+            f"border:1px solid {colors['button_border']};"
+            "border-radius:8px;"
+            "padding:0 12px;"
+            f"color:{colors['text_primary']};"
+            "font-size:12px;"
+            "font-weight:600;"
+            "}"
+            f"QPushButton:hover {{ background:{colors['button_hover']}; }}"
+            "QPushButton:checked { background:#355680; border-color:#4b74a7; }"
+            "QPushButton:disabled {"
+            f"background:{colors['button_disabled_bg']};"
+            f"border-color:{colors['button_disabled_border']};"
+            f"color:{colors['button_disabled_text']};"
+            "}"
+        )
+
+    def apply_icon_button_style(self, button: QPushButton) -> None:
+        colors = self.theme_colors()
+        button.setStyleSheet(
+            "QPushButton {"
+            f"background:{colors['button_bg']};"
+            f"border:1px solid {colors['button_border']};"
+            "border-radius:8px;"
+            "}"
+            f"QPushButton:hover {{ background:{colors['button_hover']}; }}"
+            "QPushButton:disabled {"
+            f"background:{colors['button_disabled_bg']};"
+            f"border-color:{colors['button_disabled_border']};"
+            "}"
+        )
+
+    def apply_section_panel_style(self, frame: QFrame) -> None:
+        colors = self.theme_colors()
+        frame.setStyleSheet(
+            f"QFrame {{ background:{colors['panel_bg']}; border:1px solid {colors['panel_border']}; border-radius:10px; }}"
+        )
+        title_label = getattr(frame, "section_title_label", None)
+        if title_label is not None:
+            title_label.setStyleSheet(
+                f"font-size:14px; font-weight:700; color:{colors['text_primary']}; background:transparent; border:none;"
+            )
+
+    def apply_theme(self) -> None:
+        colors = self.theme_colors()
+        self.experimental_page.setStyleSheet("background:transparent; border:none;")
+        self.experimental_footer_widget.setStyleSheet("background:transparent; border:none;")
+        self.scroll_area.setStyleSheet("QScrollArea { background:transparent; border:none; }")
+        self.cards_container.setStyleSheet("background:transparent; border:none;")
+        self.playlist_tracks_scroll.setStyleSheet(
+            "QScrollArea { background:transparent; border:none; }"
+        )
+        self.playlist_tracks_container.setStyleSheet("background:transparent; border:none;")
+        for button in [
+            self.select_elenveil_root_button,
+            self.open_music_folder_button,
+            self.create_playlist_button,
+            self.import_button,
+            self.new_track_button,
+            self.start_button,
+        ]:
+            self.apply_icon_button_style(button)
+        for button in [self.sort_date_button, self.sort_title_button]:
+            self.apply_header_button_style(button)
+        if "проверка" in self.ffmpeg_status_label.text().casefold():
+            self.ffmpeg_status_label.setStyleSheet(
+                f"color:{colors['footer_text']}; font-size:12px;"
+            )
+        self.delete_files_checkbox.setStyleSheet(
+            "QCheckBox {"
+            f"color:{colors['text_secondary']};"
+            "font-size:12px; spacing:6px; background:transparent; }"
+            "QCheckBox::indicator { width:14px; height:14px; }"
+            "QCheckBox::indicator:unchecked {"
+            f"border:1px solid {colors['checkbox_border']};"
+            f"background:{colors['checkbox_bg']};"
+            "border-radius:3px; }"
+            "QCheckBox::indicator:checked {"
+            f"border:1px solid {colors['checkbox_checked']};"
+            f"background:{colors['checkbox_checked']};"
+            "border-radius:3px; }"
+        )
+        self.playlist_list.setStyleSheet(
+            "QListWidget {"
+            f"background:{colors['list_bg']};"
+            "border:none; padding:6px; }"
+            "QListWidget::item { padding:0; margin:0 0 8px 0; border:none; }"
+            "QListWidget::item:selected { background:transparent; }"
+        )
+        self.playlist_tracks_empty.setStyleSheet(
+            f"font-size:14px; color:{colors['text_muted']}; padding:24px; background:transparent; border:none;"
+        )
+        for frame in [self.playlists_panel, self.tracks_panel, self.metadata_panel]:
+            self.apply_section_panel_style(frame)
+        for key, value_label in self.metadata_values.items():
+            value_label.setStyleSheet(
+                f"font-size:13px; color:{colors['text_primary']}; background:transparent; border:none;"
+            )
+        for layout_index in range(self.metadata_panel.layout().count()):
+            item = self.metadata_panel.layout().itemAt(layout_index)
+            widget = item.widget()
+            if isinstance(widget, QLabel) and widget not in self.metadata_values.values():
+                widget.setStyleSheet(
+                    f"font-size:12px; color:{colors['text_muted']}; font-weight:700; background:transparent; border:none;"
+                )
+        for widget in self.playlist_item_widgets:
+            widget.apply_theme(self.is_dark_theme())
+        for card in self.remote_track_cards:
+            card.apply_theme(self.is_dark_theme())
+        for card in self.cards:
+            card.apply_theme(self.is_dark_theme())
+        self.add_card.apply_theme(self.is_dark_theme())
 
     def update_sort_button_labels(self) -> None:
         date_arrow = "↑" if self.sort_field == "date" and self.sort_ascending else "↓"
@@ -527,8 +641,6 @@ class MainWindow(QMainWindow):
         )
 
     def refresh_experimental_source_view(self) -> None:
-        if not self.experimental_mode_toggle.isChecked():
-            return
         if self.experimental_source_mode == "all_music":
             tracks = self.get_sorted_experimental_tracks(self.local_music_tracks)
             if tracks and (
@@ -554,37 +666,28 @@ class MainWindow(QMainWindow):
             self.update_metadata_panel()
 
     def update_delete_files_checkbox_visibility(self) -> None:
-        visible = (
-            self.experimental_mode_toggle.isChecked()
-            and self.experimental_source_mode == "playlist"
-        )
+        visible = self.experimental_source_mode == "playlist"
         self.delete_files_checkbox.setVisible(visible)
 
     def update_start_button_state(self) -> None:
-        if self.experimental_mode_toggle.isChecked():
-            enabled = False
-            if (
-                self.youtube_download_thread is None
-                and self.youtube_thread is None
-                and self.experimental_source_mode == "playlist"
-                and self.selected_playlist_index is not None
-                and 0 <= self.selected_playlist_index < len(self.playlists)
-            ):
-                playlist = self.playlists[self.selected_playlist_index]
-                enabled = (
-                    playlist.source == "youtube"
-                    and not playlist.is_loading
-                    and any(
-                        track.status in (STATUS_PENDING, STATUS_ERROR, STATUS_SKIPPED)
-                        for track in playlist.tracks
-                    )
+        enabled = False
+        if (
+            self.youtube_download_thread is None
+            and self.youtube_thread is None
+            and self.experimental_source_mode == "playlist"
+            and self.selected_playlist_index is not None
+            and 0 <= self.selected_playlist_index < len(self.playlists)
+        ):
+            playlist = self.playlists[self.selected_playlist_index]
+            enabled = (
+                playlist.source == "youtube"
+                and not playlist.is_loading
+                and any(
+                    track.status in (STATUS_PENDING, STATUS_ERROR, STATUS_SKIPPED)
+                    for track in playlist.tracks
                 )
-            self.start_button.setEnabled(enabled)
-            return
-
-        self.start_button.setEnabled(
-            any(task.status == STATUS_PENDING for task in self.tasks)
-        )
+            )
+        self.start_button.setEnabled(enabled)
 
     def refresh_local_music_tracks(self) -> None:
         self.ensure_elenveil_directories()
@@ -708,50 +811,15 @@ class MainWindow(QMainWindow):
         self.update_delete_files_checkbox_visibility()
         self.update_start_button_state()
 
-    def apply_mode_state(self, is_experimental: bool) -> None:
-        self.select_elenveil_root_button.setVisible(is_experimental)
-        self.open_music_folder_button.setVisible(is_experimental)
-        self.create_playlist_button.setVisible(is_experimental)
-        self.experimental_footer_widget.setVisible(is_experimental)
-        self.relayout_status_widgets(is_experimental)
-        if is_experimental:
-            self.content_stack.setCurrentWidget(self.experimental_page)
-            self.resize(max(self.width(), 1180), max(self.height(), 720))
-        else:
-            self.relocate_track_view(self.normal_page_layout)
-            self.content_stack.setCurrentWidget(self.normal_page)
-            self.resize(640, max(self.height(), 640))
-        self.update_metadata_panel()
-        self.update_delete_files_checkbox_visibility()
-        self.update_start_button_state()
-
-    def relayout_status_widgets(self, is_experimental: bool) -> None:
-        self.clear_layout(self.top_layout)
+    def relayout_status_widgets(self) -> None:
         self.clear_layout(self.experimental_footer_layout)
-        if is_experimental:
-            self.experimental_footer_left_spacer.setFixedWidth(
-                self.experimental_mode_controls_widget.sizeHint().width()
-            )
-            self.experimental_footer_layout.addWidget(
-                self.experimental_footer_left_spacer
-            )
-            self.experimental_footer_layout.addStretch(1)
-            self.experimental_footer_layout.addWidget(
-                self.ffmpeg_status_label,
-                0,
-                Qt.AlignmentFlag.AlignCenter,
-            )
-            self.experimental_footer_layout.addStretch(1)
-            self.experimental_footer_layout.addWidget(
-                self.experimental_mode_controls_widget,
-                0,
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-            )
-            return
-        self.top_layout.addStretch(1)
-        self.top_layout.addWidget(self.experimental_mode_controls_widget)
-        self.top_layout.addSpacing(12)
-        self.top_layout.addWidget(self.ffmpeg_status_label)
+        self.experimental_footer_layout.addStretch(1)
+        self.experimental_footer_layout.addWidget(
+            self.ffmpeg_status_label,
+            0,
+            Qt.AlignmentFlag.AlignCenter,
+        )
+        self.experimental_footer_layout.addStretch(1)
 
     def clear_layout(self, layout: QHBoxLayout | QVBoxLayout) -> None:
         while layout.count():
@@ -760,20 +828,50 @@ class MainWindow(QMainWindow):
             if widget is not None:
                 widget.setParent(None)
 
-    def on_experimental_mode_toggled(self, checked: bool) -> None:
-        self.apply_mode_state(checked)
-        if checked:
-            self.show_all_music()
-
     def open_elenveil_music_folder(self) -> None:
         self.ensure_elenveil_directories()
         QDesktopServices.openUrl(QUrl.fromLocalFile(self.elenveil_root_dir))
 
-    def set_elenveil_root_dir(self, root_dir: str, persist: bool = True) -> None:
+    def default_elenveil_root_dir(self) -> str:
+        return os.path.join(os.path.expanduser("~"), "Music", "Elenveil")
+
+    def initialize_elenveil_root_dir(
+        self, preferred_root_dir: str, fallback_root_dir: str
+    ) -> None:
+        try:
+            self.set_elenveil_root_dir(preferred_root_dir, persist=False)
+            return
+        except OSError:
+            preferred_path = os.path.abspath(os.path.expanduser(preferred_root_dir.strip()))
+            fallback_path = os.path.abspath(os.path.expanduser(fallback_root_dir.strip()))
+            if preferred_path == fallback_path:
+                raise
+
+            self.set_elenveil_root_dir(fallback_root_dir, persist=True)
+            self.startup_root_dir_warning = (
+                f"Папка по пути\n{preferred_path}\n\n"
+                "не была найдена, будет использован стандартный путь сохранения:\n\n"
+                f"{fallback_path}"
+            )
+
+    def show_startup_root_dir_warning(self) -> None:
+        if not self.startup_root_dir_warning:
+            return
+        QMessageBox.warning(
+            self,
+            "Папка Elenveil",
+            self.startup_root_dir_warning,
+        )
+        self.startup_root_dir_warning = ""
+
+    def update_elenveil_root_paths(self, root_dir: str) -> None:
         normalized_root_dir = os.path.abspath(os.path.expanduser(root_dir.strip()))
         self.elenveil_root_dir = normalized_root_dir
         self.music_library_dir = os.path.join(self.elenveil_root_dir, "music")
         self.playlists_dir = os.path.join(self.elenveil_root_dir, "playlists")
+
+    def set_elenveil_root_dir(self, root_dir: str, persist: bool = True) -> None:
+        self.update_elenveil_root_paths(root_dir)
         self.ensure_elenveil_directories()
         if persist:
             save_elenveil_root_dir(self.elenveil_root_dir)
@@ -802,7 +900,15 @@ class MainWindow(QMainWindow):
         if not selected_dir:
             return
 
-        self.set_elenveil_root_dir(selected_dir)
+        try:
+            self.set_elenveil_root_dir(selected_dir)
+        except OSError as error:
+            QMessageBox.warning(
+                self,
+                "Папка Elenveil",
+                f"Не удалось использовать выбранную папку:\n{error}",
+            )
+            return
         self.reload_library_sources_after_root_change()
 
     def ensure_elenveil_directories(self) -> None:
@@ -818,11 +924,7 @@ class MainWindow(QMainWindow):
         self.rebuild_playlist_list()
         self.refresh_local_music_tracks()
         self.restore_persisted_playlists()
-        if self.experimental_mode_toggle.isChecked():
-            self.show_all_music()
-        else:
-            self.update_metadata_panel()
-            self.update_start_button_state()
+        self.show_all_music()
 
     def restore_persisted_playlists(self) -> None:
         self.ensure_elenveil_directories()
@@ -875,6 +977,7 @@ class MainWindow(QMainWindow):
             self.playlist_loading_icon,
             self.playlist_ready_icon,
         )
+        widget.apply_theme(self.is_dark_theme())
         widget.set_loading(playlist.is_loading or playlist.is_downloading)
         row = self.playlist_list.count() - 1
         widget.clicked.connect(lambda row=row: self.playlist_list.setCurrentRow(row))
@@ -1344,8 +1447,9 @@ class MainWindow(QMainWindow):
                     playlist.note or "YouTube не вернул треки для этого плейлиста"
                 )
             self.playlist_tracks_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            colors = self.theme_colors()
             self.playlist_tracks_empty.setStyleSheet(
-                "font-size:14px; color:#8f98a6; background:transparent; border:none;"
+                f"font-size:14px; color:{colors['text_muted']}; background:transparent; border:none;"
             )
             empty_layout.addWidget(
                 self.playlist_tracks_empty,
@@ -1359,10 +1463,10 @@ class MainWindow(QMainWindow):
                 progress_bar.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 progress_bar.setStyleSheet(
                     "QProgressBar {"
-                    "background:#2a2d33;"
-                    "border:1px solid #3a3f48;"
+                    f"background:{colors['progress_bg']};"
+                    f"border:1px solid {colors['progress_border']};"
                     "border-radius:8px;"
-                    "color:#eef2f7;"
+                    f"color:{colors['text_primary']};"
                     "height:18px;"
                     "text-align:center;"
                     "}"
@@ -1389,6 +1493,7 @@ class MainWindow(QMainWindow):
             card = RemoteTrackCard(
                 track, track_index, self.status_icons, self.metadata_icon
             )
+            card.apply_theme(self.is_dark_theme())
             card.selected.connect(self.on_remote_track_selected)
             card.context_requested.connect(self.on_remote_track_context_requested)
             card.delete_requested.connect(self.on_experimental_track_delete_requested)
@@ -1906,101 +2011,63 @@ class MainWindow(QMainWindow):
         self.update_metadata_panel()
 
     def update_metadata_panel(self) -> None:
-        if self.experimental_mode_toggle.isChecked():
-            if self.experimental_source_mode == "all_music":
-                track = (
-                    self.get_sorted_experimental_tracks(self.local_music_tracks)[
-                        self.selected_experimental_track_index
-                    ]
-                    if self.selected_experimental_track_index is not None
-                    and 0
-                    <= self.selected_experimental_track_index
-                    < len(self.local_music_tracks)
-                    else None
-                )
-                values = {
-                    "Название": track.title if track else "Трек не выбран",
-                    "Канал": "Вся музыка",
-                    "URL": track.file_path if track else "—",
-                    "Автор": track.artists if track else "—",
-                    "Альбом": track.album if track else "—",
-                    "Статус": self.get_track_status_title(track)
-                    if track
-                    else "Нет треков",
-                }
-            else:
-                playlist = (
-                    self.playlists[self.selected_playlist_index]
-                    if self.selected_playlist_index is not None
-                    and 0 <= self.selected_playlist_index < len(self.playlists)
-                    else None
-                )
-                sorted_tracks = (
-                    self.get_sorted_experimental_tracks(playlist.tracks)
-                    if playlist is not None
-                    else []
-                )
-                track = (
-                    sorted_tracks[self.selected_experimental_track_index]
-                    if self.selected_experimental_track_index is not None
-                    and 0 <= self.selected_experimental_track_index < len(sorted_tracks)
-                    else None
-                )
-                values = {
-                    "Название": track.title if track else "Трек не выбран",
-                    "Канал": playlist.name if playlist else "—",
-                    "URL": (
-                        track.source_url
-                        if isinstance(track, RemoteTrack)
-                        else track.file_path
-                    )
-                    if track
-                    else "—",
-                    "Автор": track.artists if track else "—",
-                    "Альбом": track.album if track else "—",
-                    "Статус": (
-                        self.get_track_status_title(track)
-                        if track
-                        else (
-                            "Подгрузка плейлиста"
-                            if playlist and playlist.is_loading
-                            else (playlist.note or "Нет треков")
-                            if playlist
-                            else "Нет треков"
-                        )
-                    ),
-                }
-        else:
-            task = (
-                self.tasks[self.selected_task_index]
-                if self.selected_task_index is not None
+        if self.experimental_source_mode == "all_music":
+            track = (
+                self.get_sorted_experimental_tracks(self.local_music_tracks)[
+                    self.selected_experimental_track_index
+                ]
+                if self.selected_experimental_track_index is not None
+                and 0 <= self.selected_experimental_track_index < len(self.local_music_tracks)
                 else None
             )
-            if task is None:
-                values = {
-                    "Название": "Трек не выбран",
-                    "Канал": "—",
-                    "URL": "—",
-                    "Автор": "—",
-                    "Альбом": "—",
-                    "Статус": "—",
-                }
-            else:
-                status_titles = {
-                    STATUS_META_LOADING: "Подгрузка метаданных",
-                    STATUS_PENDING: "Ожидает загрузки",
-                    STATUS_DOWNLOADING: "Загружается",
-                    STATUS_DONE: "Завершено",
-                    STATUS_ERROR: "Ошибка",
-                }
-                values = {
-                    "Название": task.title or "—",
-                    "Канал": task.channel or "—",
-                    "URL": task.url or "—",
-                    "Автор": task.meta_author or "—",
-                    "Альбом": task.meta_album or "—",
-                    "Статус": status_titles.get(task.status, "—"),
-                }
+            values = {
+                "Название": track.title if track else "Трек не выбран",
+                "Канал": "Вся музыка",
+                "URL": track.file_path if track else "—",
+                "Автор": track.artists if track else "—",
+                "Альбом": track.album if track else "—",
+                "Статус": self.get_track_status_title(track) if track else "Нет треков",
+            }
+        else:
+            playlist = (
+                self.playlists[self.selected_playlist_index]
+                if self.selected_playlist_index is not None
+                and 0 <= self.selected_playlist_index < len(self.playlists)
+                else None
+            )
+            sorted_tracks = (
+                self.get_sorted_experimental_tracks(playlist.tracks)
+                if playlist is not None
+                else []
+            )
+            track = (
+                sorted_tracks[self.selected_experimental_track_index]
+                if self.selected_experimental_track_index is not None
+                and 0 <= self.selected_experimental_track_index < len(sorted_tracks)
+                else None
+            )
+            values = {
+                "Название": track.title if track else "Трек не выбран",
+                "Канал": playlist.name if playlist else "—",
+                "URL": (
+                    track.source_url if isinstance(track, RemoteTrack) else track.file_path
+                )
+                if track
+                else "—",
+                "Автор": track.artists if track else "—",
+                "Альбом": track.album if track else "—",
+                "Статус": (
+                    self.get_track_status_title(track)
+                    if track
+                    else (
+                        "Подгрузка плейлиста"
+                        if playlist and playlist.is_loading
+                        else (playlist.note or "Нет треков")
+                        if playlist
+                        else "Нет треков"
+                    )
+                ),
+            }
         for key, value in values.items():
             self.metadata_values[key].setText(value)
 
@@ -2066,10 +2133,7 @@ class MainWindow(QMainWindow):
         del index
         if success:
             self.refresh_local_music_tracks()
-            if (
-                self.experimental_mode_toggle.isChecked()
-                and self.experimental_source_mode == "all_music"
-            ):
+            if self.experimental_source_mode == "all_music":
                 tracks = self.get_sorted_experimental_tracks(self.local_music_tracks)
                 self.selected_experimental_track_index = 0 if tracks else None
                 self.render_experimental_tracks(tracks)
@@ -2246,36 +2310,7 @@ class MainWindow(QMainWindow):
         )
 
     def import_links(self) -> None:
-        if self.experimental_mode_toggle.isChecked():
-            self.import_links_for_experimental_mode()
-            return
-        if self.metadata_thread is not None:
-            QMessageBox.information(
-                self, "Импорт", "Дождитесь завершения подгрузки метаданных."
-            )
-            return
-
-        txt_file, _ = QFileDialog.getOpenFileName(
-            self,
-            "Выберите .txt файл со ссылками",
-            "",
-            "Text files (*.txt)",
-        )
-        if not txt_file:
-            return
-
-        try:
-            with open(txt_file, "r", encoding="utf-8") as source:
-                links = [line.strip() for line in source if line.strip()]
-        except Exception as exc:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось прочитать файл:\n{exc}")
-            return
-
-        if not links:
-            QMessageBox.information(self, "Пустой файл", "Ссылки не найдены.")
-            return
-
-        self.enqueue_links(links)
+        self.import_links_for_experimental_mode()
 
     def import_links_for_experimental_mode(self) -> None:
         if self.experimental_source_mode != "all_music":
@@ -2321,10 +2356,7 @@ class MainWindow(QMainWindow):
 
     def on_experimental_import_completed(self) -> None:
         self.refresh_local_music_tracks()
-        if (
-            self.experimental_mode_toggle.isChecked()
-            and self.experimental_source_mode == "all_music"
-        ):
+        if self.experimental_source_mode == "all_music":
             tracks = self.get_sorted_experimental_tracks(self.local_music_tracks)
             if tracks and (
                 self.selected_experimental_track_index is None
@@ -2499,6 +2531,7 @@ class MainWindow(QMainWindow):
             card = DownloadCard(
                 task, start_index + offset, self.metadata_icon, self.status_icons
             )
+            card.apply_theme(self.is_dark_theme())
             card.metadata_requested.connect(self.on_card_metadata_requested)
             card.delete_requested.connect(self.on_card_delete_requested)
             card.selected.connect(self.on_card_selected)
@@ -2667,36 +2700,7 @@ class MainWindow(QMainWindow):
             card.set_list_index(index)
 
     def start_downloads(self) -> None:
-        if self.experimental_mode_toggle.isChecked():
-            self.start_playlist_track_downloads()
-            return
-
-        if self.metadata_thread is not None:
-            QMessageBox.information(
-                self, "Старт", "Дождитесь завершения подгрузки метаданных."
-            )
-            return
-
-        if self.download_thread is not None:
-            QMessageBox.information(self, "Старт", "Загрузка уже выполняется.")
-            return
-
-        if not any(task.status == STATUS_PENDING for task in self.tasks):
-            QMessageBox.information(self, "Старт", "Нет задач со статусом ожидания.")
-            return
-
-        os.makedirs(self.music_library_dir, exist_ok=True)
-        out_dir = QFileDialog.getExistingDirectory(
-            self,
-            "Выберите директорию загрузки mp3",
-            self.music_library_dir,
-        )
-        if not out_dir:
-            return
-
-        self.output_dir = out_dir
-        self.start_button.setEnabled(False)
-        self.start_next_download()
+        self.start_playlist_track_downloads()
 
     def start_playlist_track_downloads(self) -> None:
         if self.youtube_thread is not None:
