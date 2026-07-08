@@ -52,3 +52,47 @@ def save_elenveil_root_dir(path: str) -> None:
     library["elenveil_root_dir"] = path.strip()
     settings["library"] = library
     save_app_settings(settings)
+
+
+def load_theme_mode() -> str:
+    settings = load_app_settings()
+    appearance = settings.get("appearance")
+    if not isinstance(appearance, dict):
+        return ""
+    mode = str(appearance.get("theme_mode") or "").strip().lower()
+    return mode if mode in {"light", "dark"} else ""
+
+
+def save_theme_mode(mode: str) -> None:
+    normalized_mode = mode.strip().lower()
+    if normalized_mode not in {"light", "dark"}:
+        return
+    settings = load_app_settings()
+    appearance = settings.get("appearance")
+    if not isinstance(appearance, dict):
+        appearance = {}
+    appearance["theme_mode"] = normalized_mode
+    settings["appearance"] = appearance
+    save_app_settings(settings)
+
+
+def load_youtube_auth_settings() -> dict[str, str]:
+    settings = load_app_settings()
+    youtube = settings.get("youtube")
+    if not isinstance(youtube, dict):
+        return {"cookies_browser": "", "cookies_file": ""}
+    return {
+        "cookies_browser": str(youtube.get("cookies_browser") or "").strip(),
+        "cookies_file": str(youtube.get("cookies_file") or "").strip(),
+    }
+
+
+def save_youtube_auth_settings(cookies_browser: str, cookies_file: str) -> None:
+    settings = load_app_settings()
+    youtube = settings.get("youtube")
+    if not isinstance(youtube, dict):
+        youtube = {}
+    youtube["cookies_browser"] = cookies_browser.strip().lower()
+    youtube["cookies_file"] = cookies_file.strip()
+    settings["youtube"] = youtube
+    save_app_settings(settings)

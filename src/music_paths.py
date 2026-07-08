@@ -47,12 +47,7 @@ def build_music_output_template(
     target_dir.mkdir(parents=True, exist_ok=True)
 
     normalized_title = sanitize_music_path_part(title) or "Без названия"
-    normalized_artist = normalize_music_author(artist)
-
-    if normalized_artist:
-        file_name = f"{normalized_artist}{separator}{normalized_title}.%(ext)s"
-    else:
-        file_name = f"{normalized_title}.%(ext)s"
+    file_name = f"{normalized_title}.%(ext)s"
 
     return str(target_dir / file_name)
 

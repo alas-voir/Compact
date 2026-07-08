@@ -30,6 +30,7 @@ class RemoteTrack:
     artists: str
     album: str
     source_url: str
+    duration_text: str = ""
     thumbnail_data: bytes | None = None
     status: str = STATUS_PENDING
     progress: float = 0.0
@@ -44,6 +45,9 @@ class LocalMusicTrack:
     album: str
     file_path: str
     added_at: float
+    duration_text: str = ""
+    group: str = ""
+    track_number: int = 0
     thumbnail_data: bytes | None = None
     status: str = STATUS_DONE
     progress: float = 100.0

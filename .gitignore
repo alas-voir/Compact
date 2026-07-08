@@ -18,5 +18,5 @@ dist/
 .idea/
 .vscode/
 
-start.command
-build_macos.command
+./start.command
+./build_macos.command

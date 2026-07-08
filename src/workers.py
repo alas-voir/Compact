@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+import tempfile
 import urllib.request
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from .music_paths import build_music_output_template
 from .models import PlaylistEntry, RemoteTrack, STATUS_DONE, STATUS_ERROR, STATUS_SKIPPED
 from .paths import resource_path
+from .time_utils import format_duration_mmss
 
 
 def is_working_ffmpeg_dir(directory: str) -> bool:
@@ -74,9 +76,14 @@ class MetadataWorker(QObject):
     metadata_ready = pyqtSignal(int, str, str, object, str, object)
     finished = pyqtSignal()
 
-    def __init__(self, index_url_pairs: list[tuple[int, str]]) -> None:
+    def __init__(
+        self,
+        index_url_pairs: list[tuple[int, str]],
+        ytdlp_options: dict | None = None,
+    ) -> None:
         super().__init__()
         self.index_url_pairs = index_url_pairs
+        self.ytdlp_options = dict(ytdlp_options or {})
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -89,6 +96,7 @@ class MetadataWorker(QObject):
             "skip_download": True,
             "noplaylist": True,
         }
+        options.update(self.ytdlp_options)
         with yt_dlp.YoutubeDL(options) as ydl:
             for index, url in self.index_url_pairs:
                 if self._cancelled:
@@ -147,9 +155,10 @@ class YouTubePlaylistWorker(QObject):
     failed = pyqtSignal(str)
     finished = pyqtSignal()
 
-    def __init__(self, playlist_url: str) -> None:
+    def __init__(self, playlist_url: str, ytdlp_options: dict | None = None) -> None:
         super().__init__()
         self.playlist_url = playlist_url
+        self.ytdlp_options = dict(ytdlp_options or {})
 
     def run(self) -> None:
         try:
@@ -159,6 +168,7 @@ class YouTubePlaylistWorker(QObject):
                 "skip_download": True,
                 "extract_flat": "in_playlist",
             }
+            options.update(self.ytdlp_options)
             with yt_dlp.YoutubeDL(options) as ydl:
                 info = ydl.extract_info(self.playlist_url, download=False)
 
@@ -196,12 +206,16 @@ class YouTubePlaylistWorker(QObject):
                     if isinstance(thumbnails, list) and thumbnails:
                         thumbnail_url = str((thumbnails[-1] or {}).get("url") or "").strip()
                 thumbnail_data = self._load_thumbnail(thumbnail_url)
+                duration_text = format_duration_mmss(
+                    entry.get("duration_string") or entry.get("duration")
+                )
                 tracks.append(
                     RemoteTrack(
                         title=title,
                         artists=artists,
                         album=album,
                         source_url=track_url,
+                        duration_text=duration_text,
                         thumbnail_data=thumbnail_data,
                     )
                 )
@@ -233,6 +247,7 @@ class YouTubePlaylistWorker(QObject):
 
 class YouTubePlaylistDownloadWorker(QObject):
     track_started = pyqtSignal(int)
+    progress_changed = pyqtSignal(int, float)
     track_finished = pyqtSignal(int, str, str, str)
     failed = pyqtSignal(str)
     finished = pyqtSignal()
@@ -242,11 +257,13 @@ class YouTubePlaylistDownloadWorker(QObject):
         track_payloads: list[tuple[int, str, str, str, str]],
         output_dir: str,
         ffmpeg_location: str = "",
+        ytdlp_options: dict | None = None,
     ) -> None:
         super().__init__()
         self.track_payloads = track_payloads
         self.output_dir = output_dir
         self.ffmpeg_location = ffmpeg_location
+        self.ytdlp_options = dict(ytdlp_options or {})
 
     def run(self) -> None:
         try:
@@ -276,6 +293,7 @@ class YouTubePlaylistDownloadWorker(QObject):
                     "",
                     self.ffmpeg_location,
                     output_template=output_template,
+                    ytdlp_options=self.ytdlp_options,
                 )
                 result: dict[str, object] = {"success": False, "error": ""}
 
@@ -284,6 +302,7 @@ class YouTubePlaylistDownloadWorker(QObject):
                     result["error"] = error_text
 
                 worker.finished.connect(capture_finished)
+                worker.progress_changed.connect(self.progress_changed.emit)
                 worker.run()
 
                 if bool(result["success"]):
@@ -316,6 +335,7 @@ class DownloadWorker(QObject):
         cover_path: str,
         ffmpeg_location: str = "",
         output_template: str = "",
+        ytdlp_options: dict | None = None,
     ) -> None:
         super().__init__()
         self.index = index
@@ -325,6 +345,7 @@ class DownloadWorker(QObject):
         self.cover_path = cover_path
         self.ffmpeg_location = ffmpeg_location
         self.output_template = output_template
+        self.ytdlp_options = dict(ytdlp_options or {})
 
     def _progress_hook(self, event: dict) -> None:
         status = event.get("status")
@@ -378,6 +399,7 @@ class DownloadWorker(QObject):
                 },
             ],
         }
+        options.update(self.ytdlp_options)
         if ffmpeg_location:
             options["ffmpeg_location"] = ffmpeg_location
         original_path = os.environ.get("PATH", "")
@@ -565,3 +587,205 @@ class DownloadWorker(QObject):
             raise RuntimeError(process.stderr.strip() or "FFmpeg metadata update failed")
 
         os.replace(temp_path, output_path)
+
+
+class SlicedTrackDownloadWorker(QObject):
+    finished = pyqtSignal(bool, str)
+
+    def __init__(
+        self,
+        url: str,
+        output_dir: str,
+        segments: list[dict[str, object]],
+        thumbnail_data: bytes | None = None,
+        ffmpeg_location: str = "",
+        ytdlp_options: dict | None = None,
+    ) -> None:
+        super().__init__()
+        self.url = url
+        self.output_dir = output_dir
+        self.segments = segments
+        self.thumbnail_data = thumbnail_data
+        self.ffmpeg_location = ffmpeg_location
+        self.ytdlp_options = dict(ytdlp_options or {})
+
+    def run(self) -> None:
+        ffmpeg_dir = resolve_ffmpeg_directory(self.ffmpeg_location)
+        ffmpeg_binary = resolve_ffmpeg_binary(ffmpeg_dir)
+        original_path = os.environ.get("PATH", "")
+        if ffmpeg_dir:
+            os.environ["PATH"] = f"{ffmpeg_dir}:{original_path}" if original_path else ffmpeg_dir
+
+        try:
+            verifier = DownloadWorker(
+                0,
+                self.url,
+                self.output_dir,
+                {},
+                "",
+                self.ffmpeg_location,
+                ytdlp_options=self.ytdlp_options,
+            )
+            verifier._verify_ffmpeg_tools(ffmpeg_dir)
+
+            with tempfile.TemporaryDirectory(prefix="elenveil-slice-") as temp_dir:
+                source_path = self._download_source_media(temp_dir)
+                default_cover_path = self._write_default_cover(temp_dir)
+                for segment in self.segments:
+                    self._export_segment(
+                        source_path,
+                        default_cover_path,
+                        ffmpeg_binary,
+                        segment,
+                    )
+            self.finished.emit(True, "")
+        except Exception as exc:
+            self.finished.emit(False, str(exc))
+        finally:
+            if ffmpeg_dir:
+                os.environ["PATH"] = original_path
+
+    def _download_source_media(self, temp_dir: str) -> str:
+        outtmpl = os.path.join(temp_dir, "source.%(ext)s")
+        options = {
+            "format": "best",
+            "outtmpl": outtmpl,
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+        }
+        options.update(self.ytdlp_options)
+        if self.ffmpeg_location:
+            options["ffmpeg_location"] = self.ffmpeg_location
+
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(self.url, download=True)
+            requested = info.get("requested_downloads")
+            if isinstance(requested, list) and requested:
+                first = requested[0]
+                if isinstance(first, dict):
+                    filepath = first.get("filepath")
+                    if isinstance(filepath, str) and filepath and os.path.exists(filepath):
+                        return filepath
+            prepared = ydl.prepare_filename(info)
+            if os.path.exists(prepared):
+                return prepared
+        raise RuntimeError("Не удалось определить путь к исходному файлу для нарезки.")
+
+    def _write_default_cover(self, temp_dir: str) -> str:
+        if not self.thumbnail_data:
+            return ""
+        cover_path = os.path.join(temp_dir, "cover.jpg")
+        with open(cover_path, "wb") as cover_file:
+            cover_file.write(self.thumbnail_data)
+        return cover_path
+
+    def _export_segment(
+        self,
+        source_path: str,
+        default_cover_path: str,
+        ffmpeg_binary: str,
+        segment: dict[str, object],
+    ) -> None:
+        title = str(segment.get("title") or "").strip()
+        artist = str(segment.get("artist") or "").strip()
+        album_artist = str(segment.get("group") or "").strip()
+        album = str(segment.get("album") or "").strip()
+        start = str(segment.get("start") or "").strip()
+        end = str(segment.get("end") or "").strip()
+        cover_mode = str(segment.get("cover_mode") or "keep").strip()
+        custom_cover_path = str(segment.get("cover_path") or "").strip()
+
+        output_template = build_music_output_template(
+            self.output_dir,
+            title=title,
+            artist=artist,
+            album=album,
+            separator=" - ",
+        )
+        output_path = output_template.replace("%(ext)s", "mp3")
+
+        duration = self._calculate_duration(start, end)
+        ffmpeg_args = [
+            ffmpeg_binary,
+            "-y",
+            "-ss",
+            start,
+            "-t",
+            duration,
+            "-i",
+            source_path,
+        ]
+
+        cover_path = ""
+        if cover_mode == "custom" and custom_cover_path and os.path.exists(custom_cover_path):
+            cover_path = custom_cover_path
+        elif cover_mode != "clear" and default_cover_path and os.path.exists(default_cover_path):
+            cover_path = default_cover_path
+
+        if cover_path:
+            ffmpeg_args.extend(["-i", cover_path])
+
+        ffmpeg_args.extend(["-map", "0:a:0"])
+        if cover_path:
+            ffmpeg_args.extend(
+                [
+                    "-map",
+                    "1:v:0",
+                    "-c:v",
+                    "mjpeg",
+                    "-disposition:v:0",
+                    "attached_pic",
+                ]
+            )
+
+        ffmpeg_args.extend(["-c:a", "libmp3lame", "-q:a", "0", "-id3v2_version", "3"])
+
+        metadata_values = {
+            "title": title,
+            "artist": artist,
+            "album_artist": album_artist,
+            "album": album,
+        }
+        for key, value in metadata_values.items():
+            if value:
+                ffmpeg_args.extend(["-metadata", f"{key}={value}"])
+
+        if cover_path:
+            ffmpeg_args.extend(
+                [
+                    "-metadata:s:v",
+                    "title=Album cover",
+                    "-metadata:s:v",
+                    "comment=Cover (front)",
+                ]
+            )
+
+        ffmpeg_args.append(output_path)
+        process = subprocess.run(ffmpeg_args, capture_output=True, text=True, check=False)
+        if process.returncode != 0:
+            raise RuntimeError(process.stderr.strip() or f"Не удалось нарезать фрагмент '{title or start}'.")
+
+    def _calculate_duration(self, start: str, end: str) -> str:
+        start_seconds = self._timestamp_to_seconds(start)
+        end_seconds = self._timestamp_to_seconds(end)
+        if end_seconds <= start_seconds:
+            raise RuntimeError(f"Некорректный интервал: {start} - {end}")
+        return str(end_seconds - start_seconds)
+
+    def _timestamp_to_seconds(self, value: str) -> float:
+        parts = value.split(":")
+        if not parts:
+            raise RuntimeError(f"Некорректное время: {value}")
+        try:
+            if len(parts) == 1:
+                return float(parts[0])
+            if len(parts) == 2:
+                minutes, seconds = parts
+                return int(minutes) * 60 + float(seconds)
+            if len(parts) == 3:
+                hours, minutes, seconds = parts
+                return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+        except ValueError as exc:
+            raise RuntimeError(f"Некорректное время: {value}") from exc
+        raise RuntimeError(f"Некорректное время: {value}")

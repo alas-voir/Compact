@@ -3,6 +3,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+export PYINSTALLER_CONFIG_DIR="$PWD/.pyinstaller"
+mkdir -p "$PYINSTALLER_CONFIG_DIR"
+
 if [[ -x ".vnv/bin/python" ]]; then
   PYTHON_BIN=".vnv/bin/python"
 else
@@ -24,6 +27,7 @@ fi
   --name Elenveil \
   --collect-all yt_dlp \
   --add-data "assets:assets" \
+  --add-data "bin:bin" \
   "${ICON_ARGS[@]}" \
   app.py
 

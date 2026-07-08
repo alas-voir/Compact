@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from mutagen.id3 import APIC, ID3, ID3NoHeaderError, TALB, TIT2, TPE1, TPE2
+from mutagen.id3 import APIC, ID3, ID3NoHeaderError, TALB, TIT2, TPE1, TPE2, TRCK
 
 
 def apply_mp3_metadata(
@@ -12,6 +12,7 @@ def apply_mp3_metadata(
     album: str,
     cover_mode: str,
     cover_path: str,
+    track_number: int | None = None,
 ) -> None:
     path = Path(file_path)
     if not path.exists():
@@ -26,6 +27,13 @@ def apply_mp3_metadata(
     _set_text_frame(tags, TPE1, "TPE1", author)
     _set_text_frame(tags, TPE2, "TPE2", group)
     _set_text_frame(tags, TALB, "TALB", album)
+    if track_number is not None:
+        _set_text_frame(
+            tags,
+            TRCK,
+            "TRCK",
+            str(track_number) if track_number > 0 else "",
+        )
 
     if cover_mode == "clear":
         tags.delall("APIC")
