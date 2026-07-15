@@ -1,11 +1,27 @@
 # -*- mode: python ; coding: utf-8 -*-
+from pathlib import Path
+
 from PyInstaller.utils.hooks import collect_all
+
+
+def _existing_entries(entries):
+    filtered = []
+    for entry in entries:
+        source = entry[0]
+        if isinstance(source, (list, tuple)):
+            source = source[0]
+        if Path(source).exists():
+            filtered.append(entry)
+    return filtered
+
 
 datas = [('assets', 'assets'), ('bin', 'bin')]
 binaries = []
 hiddenimports = []
 tmp_ret = collect_all('yt_dlp')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+datas += _existing_entries(tmp_ret[0])
+binaries += _existing_entries(tmp_ret[1])
+hiddenimports += tmp_ret[2]
 
 
 a = Analysis(

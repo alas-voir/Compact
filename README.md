@@ -40,6 +40,11 @@ python3 app.py
 ./build_macos.command
 ```
 
+Скрипт собирает:
+
+- `dist/Elenveil.app`
+- `dist/Elenveil.dmg`
+
 ## Публикация в GitHub
 
 После инициализации репозитория:

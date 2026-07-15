@@ -151,6 +151,15 @@ class BackChevronButton(QToolButton):
         painter.end()
 
 
+class ClickableLabel(QLabel):
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
 class PlaylistListItemWidget(QFrame):
     clicked = pyqtSignal()
     context_requested = pyqtSignal(object)
@@ -827,6 +836,7 @@ class RemoteTrackCard(QFrame):
     context_requested = pyqtSignal(int, object)
     reveal_requested = pyqtSignal(int)
     delete_requested = pyqtSignal(int)
+    status_requested = pyqtSignal(int)
 
     def __init__(
         self,
@@ -876,10 +886,14 @@ class RemoteTrackCard(QFrame):
             self.position_label, 0, alignment=Qt.AlignmentFlag.AlignVCenter
         )
 
-        self.status_icon_label = QLabel()
+        self.status_icon_label = ClickableLabel()
         self.status_icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_icon_label.setFixedSize(18, 18)
+        self.status_icon_label.setCursor(Qt.CursorShape.PointingHandCursor)
         self.status_icon_label.setStyleSheet("background:transparent; border:none;")
+        self.status_icon_label.clicked.connect(
+            lambda: self.status_requested.emit(self.track_index)
+        )
         self.status_icon_label.setParent(self)
 
         self.duration_label = QLabel()
@@ -1596,6 +1610,12 @@ class DownloadCard(QFrame):
 
     def update_status_icon(self, status: str | None = None) -> None:
         state = status if status is not None else STATUS_PENDING
+        if state in (STATUS_DOWNLOADING, STATUS_META_LOADING):
+            self.status_icon_label.setToolTip("Отменить загрузку")
+        elif state in (STATUS_ERROR, STATUS_SKIPPED):
+            self.status_icon_label.setToolTip("Повторить загрузку")
+        else:
+            self.status_icon_label.setToolTip("")
         icon = self.status_icons.get(state)
         if icon is None or icon.isNull():
             self.status_icon_label.clear()
@@ -1665,8 +1685,11 @@ class DownloadCard(QFrame):
 
 
 class DownloadQueueCard(QFrame):
+    status_requested = pyqtSignal(str)
+
     def __init__(
         self,
+        item_key: str,
         title: str,
         progress: float,
         status: str,
@@ -1674,12 +1697,14 @@ class DownloadQueueCard(QFrame):
         status_icons: dict[str, QIcon],
     ) -> None:
         super().__init__()
+        self.item_key = item_key
+        self.raw_title = title or "Без названия"
         self.current_status = status
         self.status_icons = status_icons
         self.status_rotation_angle = 0
         self.dark_theme = True
         self.setObjectName("download_queue_card")
-        self.setFixedHeight(78)
+        self.setFixedHeight(82)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         layout = QHBoxLayout(self)
@@ -1697,6 +1722,9 @@ class DownloadQueueCard(QFrame):
         self.title_label = QLabel(title)
         self.title_label.setWordWrap(False)
         self.title_label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        self.title_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setTextVisible(True)
@@ -1706,9 +1734,13 @@ class DownloadQueueCard(QFrame):
         info_layout.addWidget(self.progress_bar)
         layout.addLayout(info_layout, 1)
 
-        self.status_icon_label = QLabel()
+        self.status_icon_label = ClickableLabel()
         self.status_icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_icon_label.setFixedSize(20, 20)
+        self.status_icon_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.status_icon_label.clicked.connect(
+            lambda: self.status_requested.emit(self.item_key)
+        )
         layout.addWidget(self.status_icon_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.apply_theme(True)
@@ -1721,8 +1753,9 @@ class DownloadQueueCard(QFrame):
         status: str,
         thumbnail_data: bytes | None,
     ) -> None:
+        self.raw_title = title or "Без названия"
         self.current_status = status
-        self.title_label.setText(title or "Без названия")
+        self.update_title_label()
         normalized_progress = int(max(0.0, min(100.0, progress)))
         self.progress_bar.setValue(normalized_progress)
         self.progress_bar.setFormat(f"{normalized_progress}%")
@@ -1738,6 +1771,24 @@ class DownloadQueueCard(QFrame):
                 return
         self.preview_label.clear()
         self.preview_label.setText("Нет\nобложки")
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.update_title_label()
+
+    def update_title_label(self) -> None:
+        limited_title = self.raw_title
+        if len(limited_title) > 20:
+            limited_title = f"{limited_title[:20].rstrip()}..."
+        available_width = max(40, self.title_label.width() or 40)
+        metrics = self.title_label.fontMetrics()
+        elided = metrics.elidedText(
+            limited_title,
+            Qt.TextElideMode.ElideRight,
+            available_width,
+        )
+        self.title_label.setText(elided)
+        self.title_label.setToolTip(self.raw_title)
 
     def apply_theme(self, is_dark: bool) -> None:
         self.dark_theme = is_dark
@@ -1780,6 +1831,12 @@ class DownloadQueueCard(QFrame):
 
     def update_status_icon(self, status: str | None = None) -> None:
         state = status if status is not None else STATUS_PENDING
+        if state in (STATUS_DOWNLOADING, STATUS_META_LOADING):
+            self.status_icon_label.setToolTip("Отменить загрузку")
+        elif state in (STATUS_ERROR, STATUS_SKIPPED):
+            self.status_icon_label.setToolTip("Повторить загрузку")
+        else:
+            self.status_icon_label.setToolTip("")
         icon = self.status_icons.get(state)
         if icon is None or icon.isNull():
             self.status_icon_label.clear()

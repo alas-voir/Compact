@@ -46,6 +46,7 @@ from .dialogs import (
     SliceSegmentsDialog,
     dialog_theme_colors,
 )
+from .logger import app_log_path, get_logger
 from .library_scanner import load_music_track, scan_music_directory
 from .manual_playlist import (
     append_tracks_to_manual_playlist,
@@ -109,16 +110,19 @@ from .workers import (
     SlicedTrackDownloadWorker,
     YouTubePlaylistDownloadWorker,
     YouTubePlaylistWorker,
+    build_app_ytdlp_options,
 )
 from .ytdlp_auth import build_ytdlp_auth_options
+from .youtube_urls import normalize_youtube_track_url
 
 
 class MainWindow(QMainWindow):
-    PROJECT_VERSION = "0.5"
+    PROJECT_VERSION = "0.5.1"
     PROJECT_GITHUB_URL = "https://github.com/ZERv3/Elenveil"
 
     def __init__(self) -> None:
         super().__init__()
+        self.logger = get_logger("elenveil.main_window")
         self.setWindowTitle("Elenveil")
         self.resize(1180, 720)
         self.startup_root_dir_warning = ""
@@ -142,6 +146,13 @@ class MainWindow(QMainWindow):
         youtube_auth = load_youtube_auth_settings()
         self.youtube_cookies_browser = youtube_auth.get("cookies_browser", "")
         self.youtube_cookies_file = youtube_auth.get("cookies_file", "")
+        self.logger.info(
+            "MainWindow init | theme=%s | cookies_browser=%s | cookies_file_set=%s | log_path=%s",
+            self.theme_mode,
+            self.youtube_cookies_browser or "<none>",
+            bool(self.youtube_cookies_file),
+            app_log_path(),
+        )
         self.metadata_icon = QIcon()
         self.cover_pick_icon = QIcon()
         self.cover_reset_icon = QIcon()
@@ -181,9 +192,19 @@ class MainWindow(QMainWindow):
         self.active_youtube_download_queue: list[int] = []
         self.active_download_index: int | None = None
         self.single_download_task: DownloadTask | None = None
+        self.pending_single_track_metadata_task: DownloadTask | None = None
+        self.pending_single_track_metadata_error = ""
+        self.pending_single_track_metadata_url = ""
         self.downloads_popup: QDialog | None = None
         self.downloads_popup_frame: QFrame | None = None
         self.downloads_popup_layout: QVBoxLayout | None = None
+        self.downloads_button_pulse_timers: list[QTimer] = []
+        self.downloads_button_pulse_active = False
+        self.toast_widget: QFrame | None = None
+        self.toast_label: QLabel | None = None
+        self.toast_timer = QTimer(self)
+        self.toast_timer.setSingleShot(True)
+        self.toast_timer.timeout.connect(self.hide_toast)
         self.selected_task_index: int | None = None
         self.selected_experimental_track_index: int | None = None
         self.selected_experimental_track_indexes: set[int] = set()
@@ -212,6 +233,12 @@ class MainWindow(QMainWindow):
         self.initialize_elenveil_root_dir(
             load_elenveil_root_dir() or default_elenveil_root_dir,
             default_elenveil_root_dir,
+        )
+        self.logger.info(
+            "Library paths initialized | root=%s | music=%s | playlists=%s",
+            self.elenveil_root_dir,
+            self.music_library_dir,
+            self.playlists_dir,
         )
 
         root = QWidget()
@@ -496,7 +523,7 @@ class MainWindow(QMainWindow):
         self.playlist_tracks_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.playlist_tracks_layout.setContentsMargins(4, 4, 4, 4)
         self.playlist_tracks_layout.setSpacing(8)
-        self.playlist_tracks_empty = QLabel("Плейлист не выбран")
+        self.playlist_tracks_empty: QLabel | None = QLabel("Плейлист не выбран")
         self.playlist_tracks_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.playlist_tracks_empty.setStyleSheet(
             "font-size:14px; color:#8f98a6; padding:24px; background:transparent; border:none;"
@@ -816,6 +843,7 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         self.sync_footer_sections()
         self.position_track_search_icon()
+        self.reposition_toast()
         if getattr(self, "experimental_source_mode", "") == "home":
             self.render_home_page()
             return
@@ -1481,6 +1509,104 @@ class MainWindow(QMainWindow):
             "}"
         )
 
+    def apply_downloads_button_style(self, pulse: bool = False) -> None:
+        if pulse:
+            self.downloads_button.setStyleSheet(
+                "QPushButton {"
+                "background:#2f7d42;"
+                "border:1px solid #42a25a;"
+                "border-radius:8px;"
+                "padding:0 12px;"
+                "color:#eefbf1;"
+                "font-size:12px;"
+                "font-weight:700;"
+                "}"
+                "QPushButton::menu-indicator { image:none; width:0px; }"
+                "QPushButton:hover { background:#37914c; }"
+                "QPushButton:disabled { background:#35623f; border-color:#35623f; color:#cfe4d5; }"
+            )
+            return
+        self.apply_header_button_style(self.downloads_button)
+
+    def set_downloads_button_pulse_state(self, active: bool) -> None:
+        self.downloads_button_pulse_active = active
+        if hasattr(self, "downloads_button"):
+            self.apply_downloads_button_style(active)
+
+    def pulse_downloads_button(self) -> None:
+        if not hasattr(self, "downloads_button"):
+            return
+        for timer in self.downloads_button_pulse_timers:
+            timer.stop()
+            timer.deleteLater()
+        self.downloads_button_pulse_timers = []
+        for delay_ms, active in ((0, True), (180, False), (320, True), (500, False)):
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(
+                lambda state=active: self.set_downloads_button_pulse_state(state)
+            )
+            timer.start(delay_ms)
+            self.downloads_button_pulse_timers.append(timer)
+
+    def ensure_toast_widget(self) -> None:
+        if self.toast_widget is not None and self.toast_label is not None:
+            return
+        self.toast_widget = QFrame(self)
+        self.toast_widget.setObjectName("download_toast")
+        self.toast_widget.hide()
+        layout = QVBoxLayout(self.toast_widget)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(0)
+        self.toast_label = QLabel()
+        self.toast_label.setWordWrap(True)
+        layout.addWidget(self.toast_label)
+
+    def reposition_toast(self) -> None:
+        if self.toast_widget is None or not self.toast_widget.isVisible():
+            return
+        margin = 16
+        footer_height = (
+            self.experimental_footer_widget.height()
+            if hasattr(self, "experimental_footer_widget")
+            else 0
+        )
+        x = self.width() - self.toast_widget.width() - margin
+        y = self.height() - footer_height - self.toast_widget.height() - margin
+        self.toast_widget.move(max(margin, x), max(margin, y))
+
+    def hide_toast(self) -> None:
+        if self.toast_widget is not None:
+            self.toast_widget.hide()
+
+    def show_toast(self, text: str, *, success: bool) -> None:
+        self.ensure_toast_widget()
+        if self.toast_widget is None or self.toast_label is None:
+            return
+        colors = self.theme_colors()
+        background = "#23452d" if success else "#4b2a2d"
+        border = "#3f8b53" if success else "#c25b66"
+        text_color = "#eefbf1" if success else "#fff0f2"
+        self.toast_widget.setStyleSheet(
+            "#download_toast {"
+            f"background:{background};"
+            f"border:1px solid {border};"
+            "border-radius:12px;"
+            "}"
+        )
+        self.toast_label.setStyleSheet(
+            f"color:{text_color}; font-size:12px; font-weight:700; background:transparent; border:none;"
+        )
+        self.toast_label.setText(text)
+        max_width = min(max(280, self.width() // 3), 420)
+        self.toast_widget.setFixedWidth(max_width)
+        self.toast_label.setFixedWidth(max_width - 28)
+        self.toast_widget.adjustSize()
+        self.reposition_toast()
+        self.toast_widget.show()
+        self.toast_widget.raise_()
+        self.toast_timer.start(3200)
+
     def apply_icon_button_style(self, button: QPushButton) -> None:
         colors = self.theme_colors()
         button.setStyleSheet(
@@ -1675,7 +1801,7 @@ class MainWindow(QMainWindow):
         self.apply_header_button_style(self.create_playlist_button)
         self.apply_header_button_style(self.track_search_filter_button)
         self.apply_icon_button_style(self.settings_button)
-        self.apply_header_button_style(self.downloads_button)
+        self.apply_downloads_button_style(self.downloads_button_pulse_active)
         self.library_view_button.setStyleSheet(
             "QPushButton {"
             "background:#d97a2b;"
@@ -1812,9 +1938,13 @@ class MainWindow(QMainWindow):
             "QListWidget::item { padding:0; margin:0 0 10px 0; border:none; }"
             "QListWidget::item:selected { background:transparent; }"
         )
-        self.playlist_tracks_empty.setStyleSheet(
-            f"font-size:14px; color:{colors['text_muted']}; padding:24px; background:transparent; border:none;"
-        )
+        if self.playlist_tracks_empty is not None:
+            try:
+                self.playlist_tracks_empty.setStyleSheet(
+                    f"font-size:14px; color:{colors['text_muted']}; padding:24px; background:transparent; border:none;"
+                )
+            except RuntimeError:
+                self.playlist_tracks_empty = None
         self.author_context_row.setStyleSheet("background:transparent; border:none;")
         self.author_context_label.setStyleSheet(
             f"font-size:12px; color:{colors['text_secondary']}; font-weight:700; background:transparent; border:none; padding:0 4px 2px 4px;"
@@ -2534,20 +2664,27 @@ class MainWindow(QMainWindow):
         save_youtube_auth_settings(cookies_browser, cookies_file)
 
     def current_ytdlp_auth_options(self) -> dict:
-        return build_ytdlp_auth_options(
+        options = build_ytdlp_auth_options(
             self.youtube_cookies_browser,
             self.youtube_cookies_file,
         )
+        self.logger.info(
+            "Built yt-dlp auth options | cookies_browser=%s | cookies_file_set=%s | keys=%s",
+            self.youtube_cookies_browser or "<none>",
+            bool(self.youtube_cookies_file),
+            sorted(options.keys()),
+        )
+        return options
 
     def show_downloads_menu(self) -> None:
-        if self.downloads_popup is not None and self.downloads_popup.isVisible():
+        if self.downloads_popup_is_alive() and self.downloads_popup.isVisible():
             self.downloads_popup.close()
             return
 
         popup = QDialog(self, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
         popup.setObjectName("downloads_popup")
         popup.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        popup.setFixedWidth(380)
+        popup.setFixedWidth(330)
         layout = QVBoxLayout(popup)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -2555,7 +2692,7 @@ class MainWindow(QMainWindow):
         frame = QFrame()
         frame.setObjectName("downloads_popup_frame")
         frame_layout = QVBoxLayout(frame)
-        frame_layout.setContentsMargins(10, 10, 10, 10)
+        frame_layout.setContentsMargins(8, 8, 8, 8)
         frame_layout.setSpacing(8)
 
         scroll = QScrollArea()
@@ -2585,6 +2722,7 @@ class MainWindow(QMainWindow):
         )
         popup.move(button_top_left.x(), button_top_left.y() - popup.height() - 8)
         popup.finished.connect(lambda _result: self.clear_downloads_popup())
+        popup.destroyed.connect(lambda *_args: self.clear_downloads_popup())
         popup.show()
 
     def clear_downloads_popup(self) -> None:
@@ -2593,6 +2731,36 @@ class MainWindow(QMainWindow):
         self.downloads_popup = None
         self.downloads_popup_frame = None
         self.downloads_popup_layout = None
+
+    def downloads_popup_is_alive(self) -> bool:
+        if self.downloads_popup is None:
+            return False
+        try:
+            self.downloads_popup.isVisible()
+        except RuntimeError:
+            self.clear_downloads_popup()
+            return False
+        return True
+
+    def downloads_popup_layout_is_alive(self) -> bool:
+        if not self.downloads_popup_is_alive() or self.downloads_popup_layout is None:
+            return False
+        try:
+            self.downloads_popup_layout.count()
+        except RuntimeError:
+            self.clear_downloads_popup()
+            return False
+        return True
+
+    def downloads_popup_frame_is_alive(self) -> bool:
+        if not self.downloads_popup_is_alive() or self.downloads_popup_frame is None:
+            return False
+        try:
+            self.downloads_popup_frame.isVisible()
+        except RuntimeError:
+            self.clear_downloads_popup()
+            return False
+        return True
 
     def active_download_queue_items(self) -> list[dict[str, object]]:
         items: list[dict[str, object]] = []
@@ -2679,13 +2847,13 @@ class MainWindow(QMainWindow):
         return items
 
     def refresh_downloads_popup(self) -> None:
-        if self.downloads_popup_layout is None:
+        if not self.downloads_popup_layout_is_alive():
             return
         self.clear_layout(self.downloads_popup_layout)
         self.download_queue_cards = []
         self.download_queue_card_keys = []
         colors = self.theme_colors()
-        if self.downloads_popup is not None:
+        if self.downloads_popup_is_alive():
             self.downloads_popup.setStyleSheet(
                 "#downloads_popup { background:transparent; border:none; }"
                 "QScrollArea, QScrollArea > QWidget > QWidget {"
@@ -2693,7 +2861,7 @@ class MainWindow(QMainWindow):
                 "border:none;"
                 "}"
             )
-        if self.downloads_popup_frame is not None:
+        if self.downloads_popup_frame_is_alive():
             self.downloads_popup_frame.setStyleSheet(
                 "#downloads_popup {"
                 "background:transparent;"
@@ -2719,6 +2887,7 @@ class MainWindow(QMainWindow):
 
         for item in items:
             card = DownloadQueueCard(
+                str(item.get("key") or ""),
                 str(item.get("title") or "Без названия"),
                 float(item.get("progress") or 0.0),
                 str(item.get("status") or STATUS_PENDING),
@@ -2726,13 +2895,14 @@ class MainWindow(QMainWindow):
                 self.status_icons,
             )
             card.apply_theme(self.is_dark_theme())
+            card.status_requested.connect(self.on_download_queue_status_requested)
             self.download_queue_cards.append(card)
             self.download_queue_card_keys.append(str(item.get("key") or ""))
             self.downloads_popup_layout.addWidget(card)
         self.downloads_popup_layout.addStretch(1)
 
     def refresh_open_downloads_popup(self) -> None:
-        if self.downloads_popup is None or not self.downloads_popup.isVisible():
+        if not self.downloads_popup_is_alive() or not self.downloads_popup.isVisible():
             return
         items = self.active_download_queue_items()
         item_keys = [str(item.get("key") or "") for item in items]
@@ -2750,10 +2920,54 @@ class MainWindow(QMainWindow):
                 )
             return
         self.refresh_downloads_popup()
+        if not self.downloads_popup_is_alive():
+            return
         self.downloads_popup.adjustSize()
         self.downloads_popup.setFixedHeight(
             min(max(self.downloads_popup.sizeHint().height(), 92), 420)
         )
+
+    def on_download_queue_status_requested(self, item_key: str) -> None:
+        if not item_key:
+            return
+        if item_key.startswith("task:"):
+            try:
+                task_index = int(item_key.split(":", 1)[1])
+            except ValueError:
+                return
+            if 0 <= task_index < len(self.tasks):
+                task = self.tasks[task_index]
+                if task.status == STATUS_DOWNLOADING:
+                    self.cancel_download_task(task_index)
+                    return
+            self.retry_task_download(task_index)
+            return
+        if item_key == "single":
+            if (
+                self.single_download_task is not None
+                and self.single_download_task.status == STATUS_DOWNLOADING
+            ):
+                self.cancel_single_download_task()
+                return
+            self.retry_single_download_task()
+            return
+        if item_key.startswith("remote:"):
+            parts = item_key.split(":")
+            if len(parts) != 3:
+                return
+            try:
+                playlist_index = int(parts[1])
+                track_index = int(parts[2])
+            except ValueError:
+                return
+            if 0 <= playlist_index < len(self.playlists):
+                playlist = self.playlists[playlist_index]
+                if 0 <= track_index < len(playlist.tracks):
+                    track = playlist.tracks[track_index]
+                    if track.status == STATUS_DOWNLOADING:
+                        self.cancel_remote_playlist_download(playlist_index, track_index)
+                        return
+            self.retry_remote_playlist_track(playlist_index, track_index)
 
     def default_elenveil_root_dir(self) -> str:
         return os.path.join(os.path.expanduser("~"), "Music", "Elenveil")
@@ -4779,6 +4993,7 @@ class MainWindow(QMainWindow):
             )
 
     def clear_track_results_layout(self) -> None:
+        self.playlist_tracks_empty = None
         while self.playlist_tracks_layout.count():
             item = self.playlist_tracks_layout.takeAt(0)
             widget = item.widget()
@@ -5091,6 +5306,7 @@ class MainWindow(QMainWindow):
                 card.apply_theme(self.is_dark_theme())
                 card.selected.connect(self.on_remote_track_selected)
                 card.context_requested.connect(self.on_remote_track_context_requested)
+                card.status_requested.connect(self.on_remote_track_status_requested)
                 card.reveal_requested.connect(
                     self.on_experimental_track_reveal_requested
                 )
@@ -5257,6 +5473,7 @@ class MainWindow(QMainWindow):
                 card.apply_theme(self.is_dark_theme())
                 card.selected.connect(self.on_remote_track_selected)
                 card.context_requested.connect(self.on_remote_track_context_requested)
+                card.status_requested.connect(self.on_remote_track_status_requested)
                 card.reveal_requested.connect(
                     self.on_experimental_track_reveal_requested
                 )
@@ -5555,6 +5772,7 @@ class MainWindow(QMainWindow):
             card.apply_theme(self.is_dark_theme())
             card.selected.connect(self.on_remote_track_selected)
             card.context_requested.connect(self.on_remote_track_context_requested)
+            card.status_requested.connect(self.on_remote_track_status_requested)
             card.reveal_requested.connect(self.on_experimental_track_reveal_requested)
             card.delete_requested.connect(self.on_experimental_track_delete_requested)
             card.set_selected(track_index in self.selected_experimental_track_indexes)
@@ -5634,11 +5852,31 @@ class MainWindow(QMainWindow):
             "author_collection",
             "album",
             "search_album_tracks",
+            "home",
         }:
             self.delete_track_from_all_music(index)
             return
         if self.experimental_source_mode == "playlist":
             self.delete_track_from_selected_playlist(index)
+
+    def on_remote_track_status_requested(self, index: int) -> None:
+        tracks = self.get_current_experimental_tracks()
+        if not (0 <= index < len(tracks)):
+            return
+        track = tracks[index]
+        if isinstance(track, LocalMusicTrack):
+            return
+        if (
+            self.experimental_source_mode == "playlist"
+            and self.selected_playlist_index is not None
+            and 0 <= self.selected_playlist_index < len(self.playlists)
+        ):
+            if track.status == STATUS_DOWNLOADING:
+                self.cancel_remote_playlist_download(self.selected_playlist_index, index)
+                return
+            if track.status not in {STATUS_ERROR, STATUS_SKIPPED}:
+                return
+            self.retry_remote_playlist_track(self.selected_playlist_index, index)
 
     def on_experimental_track_metadata_requested(self, index: int) -> None:
         tracks = self.get_current_experimental_tracks()
@@ -6359,24 +6597,33 @@ class MainWindow(QMainWindow):
         self, index: int, success: bool, error_text: str
     ) -> None:
         del index
+        toast_title = "Трек"
         if self.single_download_task is not None:
-            self.single_download_task.status = STATUS_DONE if success else STATUS_ERROR
+            cancelled = "отменена пользователем" in (error_text or "").lower()
+            self.single_download_task.status = (
+                STATUS_DONE if success else STATUS_SKIPPED if cancelled else STATUS_ERROR
+            )
             self.single_download_task.progress = (
                 100.0 if success else self.single_download_task.progress
             )
             self.single_download_task.error = error_text
             if success:
+                toast_title = self.single_download_task.meta_title or self.single_download_task.title
                 self.single_download_task = None
+            else:
+                toast_title = (
+                    self.single_download_task.meta_title or self.single_download_task.title
+                )
             self.refresh_open_downloads_popup()
         if success:
             self.refresh_local_music_tracks()
             self.refresh_experimental_source_view()
             self.update_metadata_panel()
+            self.show_toast(f"Трек загружен:\n{toast_title}", success=True)
             return
-        QMessageBox.warning(
-            self,
-            "Новый трек",
-            error_text or "Не удалось сохранить mp3 в папку music.",
+        self.show_toast(
+            f"Не удалось загрузить трек:\n{toast_title}\n{error_text or 'Не удалось сохранить mp3 в папку music.'}",
+            success=False,
         )
 
     def on_sliced_track_download_finished(self, success: bool, error_text: str) -> None:
@@ -6628,10 +6875,9 @@ class MainWindow(QMainWindow):
         if not ok or not link:
             return
 
-        task = self.fetch_metadata_for_single_track(link)
-        if task is None:
-            return
+        self.start_single_track_metadata_fetch(link)
 
+    def continue_single_track_metadata_flow(self, task: DownloadTask) -> None:
         metadata_dialog = MetadataDialog(
             self,
             task,
@@ -6651,7 +6897,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Новый трек", "Ссылка не может быть пустой.")
             return
 
-        task.url = values["url"]
+        task.url = normalize_youtube_track_url(values["url"])
         task.meta_title = values["title"]
         task.meta_author = values["author"]
         task.meta_group = values["group"]
@@ -6662,6 +6908,71 @@ class MainWindow(QMainWindow):
             task.meta_cover_path = ""
 
         self.download_single_track_to_music(task)
+
+    def start_single_track_metadata_fetch(self, url: str) -> None:
+        normalized_url = normalize_youtube_track_url(url)
+        if normalized_url != url:
+            self.logger.info(
+                "Single track URL normalized | from=%s | to=%s",
+                url,
+                normalized_url,
+            )
+        self.pending_single_track_metadata_task = None
+        self.pending_single_track_metadata_error = ""
+        self.pending_single_track_metadata_url = normalized_url
+        self.new_track_button.setEnabled(False)
+        self.import_button.setEnabled(False)
+        self.start_button.setEnabled(False)
+        self.start_metadata_load(
+            [(0, normalized_url)],
+            ready_handler=self.on_single_track_metadata_ready,
+            finished_handler=self.on_single_track_metadata_finished,
+        )
+
+    def on_single_track_metadata_ready(
+        self,
+        index: int,
+        title: str,
+        channel: str,
+        thumbnail_data: bytes | None,
+        error_text: str,
+        extracted_meta: dict[str, str],
+    ) -> None:
+        del index
+        if error_text:
+            self.pending_single_track_metadata_error = error_text
+            return
+        task = DownloadTask(url=self.pending_single_track_metadata_url)
+        task.title = title
+        task.channel = channel
+        task.thumbnail_data = thumbnail_data
+        task.meta_title = (extracted_meta.get("title") or title or "").strip()
+        task.meta_author = (extracted_meta.get("author") or channel or "").strip()
+        task.meta_group = (extracted_meta.get("group") or "").strip()
+        task.meta_album = (extracted_meta.get("album") or "").strip()
+        task.status = STATUS_PENDING
+        self.pending_single_track_metadata_task = task
+
+    def on_single_track_metadata_finished(self) -> None:
+        self.metadata_thread = None
+        self.metadata_worker = None
+        self.new_track_button.setEnabled(True)
+        self.import_button.setEnabled(True)
+        self.update_start_button_state()
+        task = self.pending_single_track_metadata_task
+        error_text = self.pending_single_track_metadata_error
+        self.pending_single_track_metadata_task = None
+        self.pending_single_track_metadata_error = ""
+        self.pending_single_track_metadata_url = ""
+        if task is not None:
+            self.continue_single_track_metadata_flow(task)
+            return
+        if error_text:
+            QMessageBox.warning(
+                self,
+                "Новый трек",
+                f"Не удалось получить метаданные по ссылке:\n{error_text}",
+            )
 
     def start_track_slicing_flow(
         self,
@@ -6684,7 +6995,7 @@ class MainWindow(QMainWindow):
             slice_dialog.get_segments(), start=1
         ):
             segment_task = DownloadTask(
-                url=base_values["url"],
+                url=normalize_youtube_track_url(base_values["url"]),
                 title=source_task.title,
                 channel=source_task.channel,
                 status=STATUS_PENDING,
@@ -6734,24 +7045,41 @@ class MainWindow(QMainWindow):
             return
 
         self.download_sliced_track_to_music(
-            base_values["url"],
+            normalize_youtube_track_url(base_values["url"]),
             source_task.thumbnail_data,
             segment_payloads,
         )
 
     def fetch_metadata_for_single_track(self, url: str) -> DownloadTask | None:
-        task = DownloadTask(url=url)
-        options = {
-            "quiet": True,
-            "no_warnings": True,
-            "skip_download": True,
-            "noplaylist": True,
-        }
+        normalized_url = normalize_youtube_track_url(url)
+        if normalized_url != url:
+            self.logger.info(
+                "Single track URL normalized | from=%s | to=%s",
+                url,
+                normalized_url,
+            )
+        task = DownloadTask(url=normalized_url)
+        options = build_app_ytdlp_options(
+            skip_download=True,
+            noplaylist=True,
+        )
         options.update(self.current_ytdlp_auth_options())
         try:
+            self.logger.info(
+                "Single track metadata fetch start | url=%s | option_keys=%s | frozen=%s",
+                normalized_url,
+                sorted(options.keys()),
+                getattr(sys, "frozen", False),
+            )
             with yt_dlp.YoutubeDL(options) as ydl:
-                info = ydl.extract_info(url, download=False)
-            task.title = info.get("title") or url
+                info = ydl.extract_info(normalized_url, download=False, process=False)
+            self.logger.info(
+                "Single track metadata fetch success | url=%s | title=%s | channel=%s",
+                normalized_url,
+                info.get("title"),
+                info.get("channel") or info.get("uploader"),
+            )
+            task.title = info.get("title") or normalized_url
             task.channel = (
                 info.get("channel")
                 or info.get("uploader")
@@ -6774,6 +7102,7 @@ class MainWindow(QMainWindow):
             task.status = STATUS_PENDING
             return task
         except Exception as exc:
+            self.logger.exception("Single track metadata fetch failed | url=%s", normalized_url)
             QMessageBox.warning(
                 self,
                 "Новый трек",
@@ -6826,6 +7155,7 @@ class MainWindow(QMainWindow):
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(self.on_single_track_download_thread_finished)
         self.refresh_open_downloads_popup()
+        self.pulse_downloads_button()
         thread.start()
 
     def download_sliced_track_to_music(
@@ -6883,7 +7213,14 @@ class MainWindow(QMainWindow):
         start_index = len(self.tasks)
         index_url_pairs: list[tuple[int, str]] = []
         for offset, link in enumerate(links):
-            task = DownloadTask(url=link)
+            normalized_link = normalize_youtube_track_url(link)
+            if normalized_link != link:
+                self.logger.info(
+                    "Queue URL normalized | from=%s | to=%s",
+                    link,
+                    normalized_link,
+                )
+            task = DownloadTask(url=normalized_link)
             self.tasks.append(task)
             card = DownloadCard(
                 task, start_index + offset, self.metadata_icon, self.status_icons
@@ -6895,7 +7232,7 @@ class MainWindow(QMainWindow):
             self.cards.append(card)
             insert_pos = max(0, self.cards_layout.count() - 1)
             self.cards_layout.insertWidget(insert_pos, card)
-            index_url_pairs.append((start_index + offset, link))
+            index_url_pairs.append((start_index + offset, normalized_link))
 
         self.start_button.setEnabled(False)
         self.import_button.setEnabled(False)
@@ -6904,19 +7241,26 @@ class MainWindow(QMainWindow):
         elif self.tasks:
             self.select_task(start_index)
         self.refresh_open_downloads_popup()
+        self.pulse_downloads_button()
         self.start_metadata_load(index_url_pairs)
 
-    def start_metadata_load(self, index_url_pairs: list[tuple[int, str]]) -> None:
+    def start_metadata_load(
+        self,
+        index_url_pairs: list[tuple[int, str]],
+        *,
+        ready_handler=None,
+        finished_handler=None,
+    ) -> None:
         worker = MetadataWorker(index_url_pairs, self.current_ytdlp_auth_options())
         thread = QThread(self)
         self.metadata_worker = worker
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.metadata_ready.connect(self.on_metadata_ready)
+        worker.metadata_ready.connect(ready_handler or self.on_metadata_ready)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self.on_metadata_finished)
+        thread.finished.connect(finished_handler or self.on_metadata_finished)
         self.metadata_thread = thread
         thread.start()
 
@@ -6977,7 +7321,7 @@ class MainWindow(QMainWindow):
             return
 
         values, cover_path, cover_mode = dialog.get_metadata_values()
-        new_url = values["url"]
+        new_url = normalize_youtube_track_url(values["url"])
         if not new_url:
             QMessageBox.warning(
                 self, "Некорректная ссылка", "Ссылка не может быть пустой."
@@ -7055,6 +7399,134 @@ class MainWindow(QMainWindow):
             any(task.status == STATUS_PENDING for task in self.tasks)
         )
         self.refresh_open_downloads_popup()
+
+    def retry_task_download(self, index: int) -> None:
+        if self.download_thread is not None:
+            return
+        if index < 0 or index >= len(self.tasks):
+            return
+        task = self.tasks[index]
+        if task.status not in {STATUS_ERROR, STATUS_SKIPPED}:
+            return
+        task.status = STATUS_PENDING
+        task.progress = 0.0
+        task.error = ""
+        self.refresh_card(index)
+        self.refresh_open_downloads_popup()
+        if self.selected_task_index == index:
+            self.update_metadata_panel()
+        self.start_next_download()
+
+    def cancel_download_task(self, index: int) -> None:
+        if index < 0 or index >= len(self.tasks):
+            return
+        task = self.tasks[index]
+        if task.status == STATUS_DOWNLOADING:
+            if self.active_download_index == index and self.download_worker is not None:
+                self.download_worker.cancel()
+            return
+        if task.status != STATUS_PENDING:
+            return
+        task.status = STATUS_SKIPPED
+        task.error = "Загрузка отменена пользователем."
+        self.refresh_card(index)
+        self.refresh_open_downloads_popup()
+        if self.selected_task_index == index:
+            self.update_metadata_panel()
+
+    def retry_single_download_task(self) -> None:
+        if self.download_thread is not None or self.single_download_task is None:
+            return
+        task = self.single_download_task
+        if task.status not in {STATUS_ERROR, STATUS_SKIPPED}:
+            return
+        self.download_single_track_to_music(task)
+
+    def cancel_single_download_task(self) -> None:
+        if self.single_download_task is None:
+            return
+        if self.single_download_task.status != STATUS_DOWNLOADING:
+            return
+        if self.download_worker is not None:
+            self.download_worker.cancel()
+
+    def retry_remote_playlist_track(self, playlist_index: int, track_index: int) -> None:
+        if self.youtube_download_thread is not None:
+            return
+        if not (0 <= playlist_index < len(self.playlists)):
+            return
+        playlist = self.playlists[playlist_index]
+        if playlist.source != "youtube":
+            return
+        if not (0 <= track_index < len(playlist.tracks)):
+            return
+        track = playlist.tracks[track_index]
+        if not isinstance(track, RemoteTrack):
+            return
+        if track.status not in {STATUS_ERROR, STATUS_SKIPPED, STATUS_PENDING}:
+            return
+
+        self.ensure_elenveil_directories()
+        self.start_button.setEnabled(False)
+        self.create_playlist_button.setEnabled(False)
+        self.active_remote_playlist_index = playlist_index
+        self.active_youtube_download_queue = [track_index]
+        playlist.is_downloading = True
+        track.status = STATUS_PENDING
+        track.progress = 0.0
+        track.error = ""
+        if 0 <= playlist_index < len(self.playlist_item_widgets):
+            self.playlist_item_widgets[playlist_index].set_loading(True)
+        self.persist_playlist(playlist_index)
+        self.refresh_experimental_source_view()
+        self.refresh_open_downloads_popup()
+
+        worker = YouTubePlaylistDownloadWorker(
+            [
+                (
+                    track_index,
+                    track.source_url,
+                    track.title,
+                    track.artists,
+                    track.album,
+                )
+            ],
+            self.music_library_dir,
+            self.ffmpeg_location,
+            self.current_ytdlp_auth_options(),
+        )
+        thread = QThread(self)
+        self.youtube_download_worker = worker
+        self.youtube_download_thread = thread
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.track_started.connect(self.on_remote_track_download_started)
+        worker.progress_changed.connect(self.on_remote_track_download_progress)
+        worker.track_finished.connect(self.on_remote_track_download_finished)
+        worker.failed.connect(self.on_youtube_track_download_failed)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self.on_youtube_track_downloads_finished)
+        self.pulse_downloads_button()
+        thread.start()
+
+    def cancel_remote_playlist_download(
+        self, playlist_index: int, track_index: int
+    ) -> None:
+        if (
+            self.active_remote_playlist_index != playlist_index
+            or self.youtube_download_worker is None
+        ):
+            return
+        if not (0 <= playlist_index < len(self.playlists)):
+            return
+        playlist = self.playlists[playlist_index]
+        if not (0 <= track_index < len(playlist.tracks)):
+            return
+        if playlist.tracks[track_index].status != STATUS_DOWNLOADING:
+            return
+        self.youtube_download_worker.cancel()
 
     def renumber_cards(self) -> None:
         for index, card in enumerate(self.cards):
@@ -7151,6 +7623,7 @@ class MainWindow(QMainWindow):
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(self.on_youtube_track_downloads_finished)
+        self.pulse_downloads_button()
         thread.start()
 
     def on_remote_track_download_started(self, track_index: int) -> None:
@@ -7359,14 +7832,15 @@ class MainWindow(QMainWindow):
 
     def on_download_finished(self, index: int, success: bool, error_text: str) -> None:
         task = self.tasks[index]
-        task.status = STATUS_DONE if success else STATUS_ERROR
+        cancelled = "отменена пользователем" in (error_text or "").lower()
+        task.status = STATUS_DONE if success else STATUS_SKIPPED if cancelled else STATUS_ERROR
         task.progress = 100.0 if success else task.progress
         task.error = error_text
         self.refresh_card(index)
         self.refresh_open_downloads_popup()
         if self.selected_task_index == index:
             self.update_metadata_panel()
-        if not success:
+        if not success and not cancelled:
             QMessageBox.warning(
                 self,
                 "Ошибка загрузки",

@@ -1,10 +1,17 @@
 #!/bin/zsh
 set -euo pipefail
+unalias rm 2>/dev/null || true
 
 cd "$(dirname "$0")"
 
 export PYINSTALLER_CONFIG_DIR="$PWD/.pyinstaller"
 mkdir -p "$PYINSTALLER_CONFIG_DIR"
+
+APP_NAME="Elenveil"
+DMG_NAME="${APP_NAME}.dmg"
+DMG_STAGING_DIR="$PWD/build/dmg"
+APP_BUNDLE_PATH="$PWD/dist/${APP_NAME}.app"
+DMG_PATH="$PWD/dist/${DMG_NAME}"
 
 if [[ -x ".vnv/bin/python" ]]; then
   PYTHON_BIN=".vnv/bin/python"
@@ -13,22 +20,26 @@ else
 fi
 
 "$PYTHON_BIN" -m pip install -r requirements.txt pyinstaller
-ICON_PATH="assets/icons/Elenveil.icns"
-ICON_ARGS=()
-if [[ -f "$ICON_PATH" ]]; then
-  ICON_ARGS=(--icon "$ICON_PATH")
-else
-  echo "Warning: icon not found at $ICON_PATH (build will continue without .icns icon)"
-fi
+/bin/rm -rf -- build dist
 
 "$PYTHON_BIN" -m PyInstaller \
+  --clean \
   --noconfirm \
-  --windowed \
-  --name Elenveil \
-  --collect-all yt_dlp \
-  --add-data "assets:assets" \
-  --add-data "bin:bin" \
-  "${ICON_ARGS[@]}" \
-  app.py
+  Elenveil.spec
 
-echo "Build complete: dist/Elenveil.app"
+mkdir -p "$DMG_STAGING_DIR"
+/bin/rm -rf -- "$DMG_STAGING_DIR"
+mkdir -p "$DMG_STAGING_DIR"
+cp -R "$APP_BUNDLE_PATH" "$DMG_STAGING_DIR/"
+ln -s /Applications "$DMG_STAGING_DIR/Applications"
+/bin/rm -f -- "$DMG_PATH"
+
+hdiutil create \
+  -volname "$APP_NAME" \
+  -srcfolder "$DMG_STAGING_DIR" \
+  -ov \
+  -format UDZO \
+  "$DMG_PATH"
+
+echo "Build complete: dist/${APP_NAME}.app"
+echo "DMG complete: dist/${DMG_NAME}"

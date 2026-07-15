@@ -7,11 +7,20 @@ from pathlib import Path
 
 import yt_dlp
 from PyQt6.QtCore import QObject, pyqtSignal
+from yt_dlp.utils import DownloadError
 
+from .logger import get_logger
 from .music_paths import build_music_output_template
 from .models import PlaylistEntry, RemoteTrack, STATUS_DONE, STATUS_ERROR, STATUS_SKIPPED
 from .paths import resource_path
 from .time_utils import format_duration_mmss
+from .youtube_urls import normalize_youtube_track_url
+
+logger = get_logger("elenveil.workers")
+
+
+class WorkerCancelledError(Exception):
+    pass
 
 
 def is_working_ffmpeg_dir(directory: str) -> bool:
@@ -36,30 +45,37 @@ def is_working_ffmpeg_dir(directory: str) -> bool:
 def resolve_ffmpeg_directory(explicit_path: str = "") -> str:
     bundled_dir = resource_path("bin")
     if is_working_ffmpeg_dir(bundled_dir):
+        logger.info("Resolved FFmpeg directory from bundled bin: %s", bundled_dir)
         return bundled_dir
 
     explicit_path = explicit_path.strip()
     if explicit_path:
         if os.path.isdir(explicit_path):
             if is_working_ffmpeg_dir(explicit_path):
+                logger.info("Resolved FFmpeg directory from explicit directory: %s", explicit_path)
                 return explicit_path
         else:
             explicit_dir = os.path.dirname(explicit_path)
             if is_working_ffmpeg_dir(explicit_dir):
+                logger.info("Resolved FFmpeg directory from explicit file path: %s", explicit_dir)
                 return explicit_dir
 
     for candidate_dir in ["/opt/homebrew/bin", "/opt/local/bin"]:
         if is_working_ffmpeg_dir(candidate_dir):
+            logger.info("Resolved FFmpeg directory from default macOS path: %s", candidate_dir)
             return candidate_dir
 
     ffmpeg_path = shutil.which("ffmpeg")
     ffprobe_path = shutil.which("ffprobe")
     if ffmpeg_path and ffprobe_path and is_working_ffmpeg_dir(os.path.dirname(ffmpeg_path)):
+        logger.info("Resolved FFmpeg directory from PATH: %s", os.path.dirname(ffmpeg_path))
         return os.path.dirname(ffmpeg_path)
 
     for candidate_dir in ["/usr/local/bin", "/usr/bin"]:
         if is_working_ffmpeg_dir(candidate_dir):
+            logger.info("Resolved FFmpeg directory from fallback path: %s", candidate_dir)
             return candidate_dir
+    logger.warning("Failed to resolve working FFmpeg directory | explicit_path=%s", explicit_path)
     return ""
 
 
@@ -70,6 +86,39 @@ def resolve_ffmpeg_binary(ffmpeg_dir: str) -> str:
             return candidate
     ffmpeg_path = shutil.which("ffmpeg")
     return ffmpeg_path or "ffmpeg"
+
+
+def build_app_ytdlp_options(**overrides) -> dict:
+    options = {
+        "ignoreconfig": True,
+        "quiet": True,
+        "no_warnings": True,
+    }
+    options.update(overrides)
+    return options
+
+
+def sanitize_ytdlp_options(options: dict) -> dict:
+    sanitized: dict[str, object] = {}
+    for key, value in options.items():
+        lowered = key.lower()
+        if "cookie" in lowered:
+            if key == "cookiesfrombrowser":
+                sanitized[key] = value
+            elif value:
+                sanitized[key] = "<set>"
+            else:
+                sanitized[key] = value
+        elif key == "progress_hooks":
+            sanitized[key] = f"<{len(value)} hooks>" if isinstance(value, list) else "<hooks>"
+        elif key == "postprocessors":
+            if isinstance(value, list):
+                sanitized[key] = [item.get("key", "<unknown>") for item in value if isinstance(item, dict)]
+            else:
+                sanitized[key] = "<postprocessors>"
+        else:
+            sanitized[key] = value
+    return sanitized
 
 
 class MetadataWorker(QObject):
@@ -90,17 +139,29 @@ class MetadataWorker(QObject):
         self._cancelled = True
 
     def run(self) -> None:
-        options = {
-            "quiet": True,
-            "no_warnings": True,
-            "skip_download": True,
-            "noplaylist": True,
-        }
+        options = build_app_ytdlp_options(
+            skip_download=True,
+            noplaylist=True,
+        )
         options.update(self.ytdlp_options)
+        logger.info(
+            "MetadataWorker started | items=%s | options=%s",
+            len(self.index_url_pairs),
+            sanitize_ytdlp_options(options),
+        )
         with yt_dlp.YoutubeDL(options) as ydl:
             for index, url in self.index_url_pairs:
                 if self._cancelled:
+                    logger.info("MetadataWorker cancelled")
                     break
+                normalized_url = normalize_youtube_track_url(url)
+                if normalized_url != url:
+                    logger.info(
+                        "MetadataWorker normalized URL | index=%s | from=%s | to=%s",
+                        index,
+                        url,
+                        normalized_url,
+                    )
                 title = url
                 channel = "Неизвестный канал"
                 thumbnail_data = None
@@ -112,7 +173,14 @@ class MetadataWorker(QObject):
                     "album": "",
                 }
                 try:
-                    info = ydl.extract_info(url, download=False)
+                    logger.info("MetadataWorker extract_info start | index=%s | url=%s", index, normalized_url)
+                    info = ydl.extract_info(normalized_url, download=False, process=False)
+                    logger.info(
+                        "MetadataWorker extract_info success | index=%s | title=%s | channel=%s",
+                        index,
+                        info.get("title"),
+                        info.get("channel") or info.get("uploader"),
+                    )
                     title = info.get("title") or title
                     channel = (
                         info.get("channel")
@@ -136,6 +204,11 @@ class MetadataWorker(QObject):
                         "album": (info.get("album") or "").strip(),
                     }
                 except Exception as exc:
+                    logger.exception(
+                        "MetadataWorker extract_info failed | index=%s | url=%s",
+                        index,
+                        normalized_url,
+                    )
                     error_text = str(exc)
                     channel = "Метаданные недоступны"
                 self.metadata_ready.emit(
@@ -162,13 +235,16 @@ class YouTubePlaylistWorker(QObject):
 
     def run(self) -> None:
         try:
-            options = {
-                "quiet": True,
-                "no_warnings": True,
-                "skip_download": True,
-                "extract_flat": "in_playlist",
-            }
+            options = build_app_ytdlp_options(
+                skip_download=True,
+                extract_flat="in_playlist",
+            )
             options.update(self.ytdlp_options)
+            logger.info(
+                "YouTubePlaylistWorker started | url=%s | options=%s",
+                self.playlist_url,
+                sanitize_ytdlp_options(options),
+            )
             with yt_dlp.YoutubeDL(options) as ydl:
                 info = ydl.extract_info(self.playlist_url, download=False)
 
@@ -200,6 +276,7 @@ class YouTubePlaylistWorker(QObject):
                 ).strip()
                 if track_url and not track_url.startswith("http"):
                     track_url = f"https://www.youtube.com/watch?v={track_url}"
+                track_url = normalize_youtube_track_url(track_url)
                 thumbnail_url = (entry.get("thumbnail") or "").strip()
                 if not thumbnail_url:
                     thumbnails = entry.get("thumbnails") or []
@@ -229,8 +306,15 @@ class YouTubePlaylistWorker(QObject):
                 tracks=tracks,
                 note="" if tracks else "YouTube не вернул треки для этого плейлиста.",
             )
+            logger.info(
+                "YouTubePlaylistWorker success | url=%s | playlist=%s | tracks=%s",
+                self.playlist_url,
+                playlist.name,
+                len(tracks),
+            )
             self.playlist_ready.emit(playlist)
         except Exception as exc:
+            logger.exception("YouTubePlaylistWorker failed | url=%s", self.playlist_url)
             self.failed.emit(str(exc))
         finally:
             self.finished.emit()
@@ -264,10 +348,25 @@ class YouTubePlaylistDownloadWorker(QObject):
         self.output_dir = output_dir
         self.ffmpeg_location = ffmpeg_location
         self.ytdlp_options = dict(ytdlp_options or {})
+        self._cancel_requested = False
+        self._active_download_worker: DownloadWorker | None = None
+
+    def cancel(self) -> None:
+        self._cancel_requested = True
+        if self._active_download_worker is not None:
+            self._active_download_worker.cancel()
 
     def run(self) -> None:
         try:
+            logger.info(
+                "YouTubePlaylistDownloadWorker started | tracks=%s | output_dir=%s",
+                len(self.track_payloads),
+                self.output_dir,
+            )
             for index, track_url, title, artists_text, album_name in self.track_payloads:
+                if self._cancel_requested:
+                    logger.info("YouTubePlaylistDownloadWorker cancelled before next track")
+                    break
                 self.track_started.emit(index)
                 if not track_url.strip():
                     self.track_finished.emit(index, STATUS_SKIPPED, "", "Пустая ссылка YouTube.")
@@ -303,12 +402,41 @@ class YouTubePlaylistDownloadWorker(QObject):
 
                 worker.finished.connect(capture_finished)
                 worker.progress_changed.connect(self.progress_changed.emit)
-                worker.run()
+                self._active_download_worker = worker
+                try:
+                    worker.run()
+                finally:
+                    self._active_download_worker = None
+
+                if worker.was_cancelled():
+                    logger.info(
+                        "YouTubePlaylistDownloadWorker track cancelled | index=%s | url=%s",
+                        index,
+                        track_url,
+                    )
+                    self.track_finished.emit(
+                        index,
+                        STATUS_SKIPPED,
+                        "",
+                        "Загрузка отменена пользователем.",
+                    )
+                    break
 
                 if bool(result["success"]):
                     local_file_path = output_template.replace("%(ext)s", "mp3")
+                    logger.info(
+                        "YouTubePlaylistDownloadWorker track finished | index=%s | path=%s",
+                        index,
+                        local_file_path,
+                    )
                     self.track_finished.emit(index, STATUS_DONE, local_file_path, "")
                 else:
+                    logger.warning(
+                        "YouTubePlaylistDownloadWorker track failed | index=%s | url=%s | error=%s",
+                        index,
+                        track_url,
+                        result["error"],
+                    )
                     self.track_finished.emit(
                         index,
                         STATUS_ERROR,
@@ -316,6 +444,7 @@ class YouTubePlaylistDownloadWorker(QObject):
                         str(result["error"] or "Не удалось загрузить трек YouTube."),
                     )
         except Exception as exc:
+            logger.exception("YouTubePlaylistDownloadWorker failed")
             self.failed.emit(str(exc))
         finally:
             self.finished.emit()
@@ -346,8 +475,18 @@ class DownloadWorker(QObject):
         self.ffmpeg_location = ffmpeg_location
         self.output_template = output_template
         self.ytdlp_options = dict(ytdlp_options or {})
+        self._cancel_requested = False
+        self._was_cancelled = False
+
+    def cancel(self) -> None:
+        self._cancel_requested = True
+
+    def was_cancelled(self) -> bool:
+        return self._was_cancelled
 
     def _progress_hook(self, event: dict) -> None:
+        if self._cancel_requested:
+            raise WorkerCancelledError("Загрузка отменена пользователем.")
         status = event.get("status")
         if status == "downloading":
             total_bytes = event.get("total_bytes") or event.get("total_bytes_estimate")
@@ -360,6 +499,15 @@ class DownloadWorker(QObject):
 
     def run(self) -> None:
         self.started.emit(self.index)
+        normalized_url = normalize_youtube_track_url(self.url)
+        if normalized_url != self.url:
+            logger.info(
+                "DownloadWorker normalized URL | index=%s | from=%s | to=%s",
+                self.index,
+                self.url,
+                normalized_url,
+            )
+        self.url = normalized_url
         output_template = self.output_template or build_music_output_template(
             self.output_dir,
             title=self.metadata_overrides.get("title") or "%(title)s",
@@ -373,15 +521,13 @@ class DownloadWorker(QObject):
         ffmpeg_dir = self._resolve_ffmpeg_directory()
         ffmpeg_location = ffmpeg_dir
         ffmpeg_binary = self._resolve_ffmpeg_binary(ffmpeg_dir)
-        options = {
-            "format": "bestaudio/best",
-            "outtmpl": output_template,
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
-            "writethumbnail": True,
-            "progress_hooks": [self._progress_hook],
-            "postprocessors": [
+        options = build_app_ytdlp_options(
+            format="bestaudio/best",
+            outtmpl=output_template,
+            noplaylist=True,
+            writethumbnail=True,
+            progress_hooks=[self._progress_hook],
+            postprocessors=[
                 {
                     "key": "FFmpegExtractAudio",
                     "preferredcodec": "mp3",
@@ -398,33 +544,123 @@ class DownloadWorker(QObject):
                     "key": "EmbedThumbnail",
                 },
             ],
-        }
+        )
         options.update(self.ytdlp_options)
         if ffmpeg_location:
             options["ffmpeg_location"] = ffmpeg_location
+        logger.info(
+            "DownloadWorker started | index=%s | url=%s | ffmpeg_dir=%s | output_template=%s | options=%s",
+            self.index,
+            normalized_url,
+            ffmpeg_dir,
+            output_template,
+            sanitize_ytdlp_options(options),
+        )
         original_path = os.environ.get("PATH", "")
         if ffmpeg_dir:
             os.environ["PATH"] = f"{ffmpeg_dir}:{original_path}" if original_path else ffmpeg_dir
         try:
+            if self._cancel_requested:
+                raise WorkerCancelledError("Загрузка отменена пользователем.")
             self._verify_ffmpeg_tools(ffmpeg_dir)
-            with yt_dlp.YoutubeDL(options) as ydl:
-                info = ydl.extract_info(self.url, download=True)
-                code = 0 if info else 1
-
-                output_path = self._resolve_output_path(ydl, info)
-                if code == 0 and output_path:
-                    effective_metadata = self._build_effective_metadata(info)
-                    self._apply_custom_metadata(
-                        output_path,
-                        effective_metadata,
-                        ffmpeg_binary,
-                    )
+            info, output_path = self._download_with_fallback(options, ffmpeg_binary)
+            code = 0 if info else 1
+            logger.info(
+                "DownloadWorker finished | index=%s | success=%s | output_path=%s",
+                self.index,
+                code == 0,
+                output_path if 'output_path' in locals() else "",
+            )
             self.finished.emit(self.index, code == 0, "" if code == 0 else "yt-dlp returned error")
+        except WorkerCancelledError as exc:
+            self._was_cancelled = True
+            logger.info(
+                "DownloadWorker cancelled | index=%s | url=%s",
+                self.index,
+                self.url,
+            )
+            self.finished.emit(self.index, False, str(exc))
         except Exception as exc:
+            logger.exception(
+                "DownloadWorker failed | index=%s | url=%s",
+                self.index,
+                self.url,
+            )
             self.finished.emit(self.index, False, str(exc))
         finally:
             if ffmpeg_dir:
                 os.environ["PATH"] = original_path
+
+    def _download_with_fallback(self, options: dict, ffmpeg_binary: str) -> tuple[dict | None, str]:
+        variants = self._build_download_option_variants(options)
+        last_error: Exception | None = None
+        for attempt_index, variant in enumerate(variants, start=1):
+            if self._cancel_requested:
+                raise WorkerCancelledError("Загрузка отменена пользователем.")
+            logger.info(
+                "DownloadWorker attempt | index=%s | attempt=%s/%s | options=%s",
+                self.index,
+                attempt_index,
+                len(variants),
+                sanitize_ytdlp_options(variant),
+            )
+            try:
+                with yt_dlp.YoutubeDL(variant) as ydl:
+                    info = ydl.extract_info(self.url, download=True)
+                    output_path = self._resolve_output_path(ydl, info)
+                    if info and output_path:
+                        effective_metadata = self._build_effective_metadata(info)
+                        self._apply_custom_metadata(
+                            output_path,
+                            effective_metadata,
+                            ffmpeg_binary,
+                        )
+                    return info, output_path
+            except DownloadError as exc:
+                last_error = exc
+                message = str(exc)
+                logger.warning(
+                    "DownloadWorker attempt failed | index=%s | attempt=%s | error=%s",
+                    self.index,
+                    attempt_index,
+                    message,
+                )
+                if "Requested format is not available" not in message:
+                    raise
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "DownloadWorker attempt failed with unexpected error | index=%s | attempt=%s | error=%s",
+                    self.index,
+                    attempt_index,
+                    exc,
+                )
+                raise
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Не удалось запустить загрузку yt-dlp.")
+
+    def _build_download_option_variants(self, base_options: dict) -> list[dict]:
+        variants: list[dict] = []
+
+        def add_variant(format_selector: str, include_auth: bool) -> None:
+            variant = dict(base_options)
+            variant["format"] = format_selector
+            if not include_auth:
+                variant.pop("cookiesfrombrowser", None)
+                variant.pop("cookiefile", None)
+                variant.pop("cookies", None)
+            if all(variant != existing for existing in variants):
+                variants.append(variant)
+
+        add_variant(str(base_options.get("format") or "bestaudio/best"), True)
+        add_variant("bestaudio", True)
+        add_variant("bestaudio*", True)
+        add_variant(str(base_options.get("format") or "bestaudio/best"), False)
+        add_variant("bestaudio", False)
+        add_variant("bestaudio*", False)
+        add_variant("best", False)
+        return variants
 
     def _resolve_ffmpeg_directory(self) -> str:
         return resolve_ffmpeg_directory(self.ffmpeg_location)
@@ -463,6 +699,11 @@ class DownloadWorker(QObject):
                 f"ffmpeg_out={ffmpeg_err[-220:] if ffmpeg_err else 'none'}; "
                 f"ffprobe_out={ffprobe_err[-220:] if ffprobe_err else 'none'}"
             )
+        logger.info(
+            "FFmpeg tools verified | ffmpeg=%s | ffprobe=%s",
+            ffmpeg_cmd,
+            ffprobe_cmd,
+        )
 
     def _is_working_ffmpeg_dir(self, directory: str) -> bool:
         return is_working_ffmpeg_dir(directory)
@@ -612,6 +853,20 @@ class SlicedTrackDownloadWorker(QObject):
     def run(self) -> None:
         ffmpeg_dir = resolve_ffmpeg_directory(self.ffmpeg_location)
         ffmpeg_binary = resolve_ffmpeg_binary(ffmpeg_dir)
+        normalized_url = normalize_youtube_track_url(self.url)
+        if normalized_url != self.url:
+            logger.info(
+                "SlicedTrackDownloadWorker normalized URL | from=%s | to=%s",
+                self.url,
+                normalized_url,
+            )
+        self.url = normalized_url
+        logger.info(
+            "SlicedTrackDownloadWorker started | url=%s | segments=%s | ffmpeg_dir=%s",
+            self.url,
+            len(self.segments),
+            ffmpeg_dir,
+        )
         original_path = os.environ.get("PATH", "")
         if ffmpeg_dir:
             os.environ["PATH"] = f"{ffmpeg_dir}:{original_path}" if original_path else ffmpeg_dir
@@ -640,6 +895,7 @@ class SlicedTrackDownloadWorker(QObject):
                     )
             self.finished.emit(True, "")
         except Exception as exc:
+            logger.exception("SlicedTrackDownloadWorker failed | url=%s", self.url)
             self.finished.emit(False, str(exc))
         finally:
             if ffmpeg_dir:
@@ -647,16 +903,19 @@ class SlicedTrackDownloadWorker(QObject):
 
     def _download_source_media(self, temp_dir: str) -> str:
         outtmpl = os.path.join(temp_dir, "source.%(ext)s")
-        options = {
-            "format": "best",
-            "outtmpl": outtmpl,
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
-        }
+        options = build_app_ytdlp_options(
+            format="best",
+            outtmpl=outtmpl,
+            noplaylist=True,
+        )
         options.update(self.ytdlp_options)
         if self.ffmpeg_location:
             options["ffmpeg_location"] = self.ffmpeg_location
+        logger.info(
+            "SlicedTrackDownloadWorker source download | url=%s | options=%s",
+            self.url,
+            sanitize_ytdlp_options(options),
+        )
 
         with yt_dlp.YoutubeDL(options) as ydl:
             info = ydl.extract_info(self.url, download=True)
