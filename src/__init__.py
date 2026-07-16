@@ -1,1 +1,1 @@
-"""Elenveil application package."""
+"""Compact application package."""

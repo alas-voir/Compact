@@ -1,0 +1,29 @@
+{
+  "id": "dark",
+  "name": "Тёмная",
+  "base": "dark",
+  "colors": {
+    "main": {
+      "app_bg": "#1c1c1c", "button_bg": "#303030", "button_hover": "#3a3a3a",
+      "button_border": "#464646", "button_disabled_bg": "#292929",
+      "button_disabled_border": "#383838", "button_disabled_text": "#929292",
+      "panel_bg": "#202020", "panel_border": "#303030", "list_bg": "#171717",
+      "text_primary": "#eef2f7", "text_secondary": "#bcbcbc", "text_muted": "#989898",
+      "checkbox_bg": "#303030", "checkbox_border": "#555555", "checkbox_checked": "#9c9c9c",
+      "progress_bg": "#292929", "progress_border": "#484848", "footer_text": "#bcbcbc"
+    },
+    "dialog": {
+      "dialog_bg": "#1c1c1c", "panel_bg": "#303030", "panel_hover": "#3a3a3a",
+      "panel_border": "#464646", "input_bg": "#171717", "input_border": "#303030",
+      "text_primary": "#eef2f7", "text_secondary": "#bcbcbc", "text_muted": "#989898",
+      "accent": "#ff5a63"
+    },
+    "palette": {
+      "window": "#1c1c1c", "window_text": "#eef2f7", "base": "#171717",
+      "alternate_base": "#202020", "tooltip_base": "#303030", "tooltip_text": "#eef2f7",
+      "text": "#eef2f7", "button": "#303030", "button_text": "#eef2f7",
+      "bright_text": "#ff5c6a", "link": "#a0a0a0", "highlight": "#565656",
+      "highlighted_text": "#eef2f7", "placeholder_text": "#8f98a6"
+    }
+  }
+}

@@ -1,5 +1,6 @@
 import sys
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
@@ -12,10 +13,13 @@ def main() -> None:
     log_path = setup_app_logging()
     logger = get_logger("elenveil.main")
     logger.info("Application startup requested")
+    QApplication.setAttribute(
+        Qt.ApplicationAttribute.AA_DontUseNativeDialogs, True
+    )
     app = QApplication(sys.argv)
-    app.setApplicationName("Elenveil")
-    app.setApplicationDisplayName("Elenveil")
-    app_icon_path = resource_path("assets", "icons", "Elenveil.icns")
+    app.setApplicationName("Compact")
+    app.setApplicationDisplayName("Compact")
+    app_icon_path = resource_path("assets", "icons", "Compact.icns")
     app_icon = QIcon(app_icon_path)
     logger.info("Application icon path: %s | exists=%s", app_icon_path, not app_icon.isNull())
     if not app_icon.isNull():

@@ -1,0 +1,29 @@
+{
+  "id": "nordic",
+  "name": "Nordic",
+  "base": "dark",
+  "colors": {
+    "main": {
+      "app_bg": "#2e3440", "button_bg": "#3b4252", "button_hover": "#434c5e",
+      "button_border": "#4c566a", "button_disabled_bg": "#343a46",
+      "button_disabled_border": "#434c5e", "button_disabled_text": "#7b8498",
+      "panel_bg": "#3b4252", "panel_border": "#4c566a", "list_bg": "#272c36",
+      "text_primary": "#eceff4", "text_secondary": "#d8dee9", "text_muted": "#aeb7c7",
+      "checkbox_bg": "#3b4252", "checkbox_border": "#4c566a", "checkbox_checked": "#88c0d0",
+      "progress_bg": "#343a46", "progress_border": "#4c566a", "footer_text": "#d8dee9"
+    },
+    "dialog": {
+      "dialog_bg": "#2e3440", "panel_bg": "#3b4252", "panel_hover": "#434c5e",
+      "panel_border": "#4c566a", "input_bg": "#272c36", "input_border": "#4c566a",
+      "text_primary": "#eceff4", "text_secondary": "#d8dee9", "text_muted": "#aeb7c7",
+      "accent": "#88c0d0"
+    },
+    "palette": {
+      "window": "#2e3440", "window_text": "#eceff4", "base": "#272c36",
+      "alternate_base": "#3b4252", "tooltip_base": "#3b4252", "tooltip_text": "#eceff4",
+      "text": "#eceff4", "button": "#3b4252", "button_text": "#eceff4",
+      "bright_text": "#bf616a", "link": "#88c0d0", "highlight": "#5e81ac",
+      "highlighted_text": "#eceff4", "placeholder_text": "#7b8498"
+    }
+  }
+}

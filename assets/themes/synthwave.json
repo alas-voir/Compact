@@ -1,0 +1,29 @@
+{
+  "id": "synthwave",
+  "name": "SynthWave ’84",
+  "base": "dark",
+  "colors": {
+    "main": {
+      "app_bg": "#262335", "button_bg": "#2a2139", "button_hover": "#463465",
+      "button_border": "#495495", "button_disabled_bg": "#241b2f",
+      "button_disabled_border": "#34294f", "button_disabled_text": "#848bbd",
+      "panel_bg": "#2a2139", "panel_border": "#495495", "list_bg": "#171520",
+      "text_primary": "#ffffff", "text_secondary": "#e8d9ff", "text_muted": "#a59ac6",
+      "checkbox_bg": "#2a2139", "checkbox_border": "#495495", "checkbox_checked": "#ff7edb",
+      "progress_bg": "#241b2f", "progress_border": "#495495", "footer_text": "#e8d9ff"
+    },
+    "dialog": {
+      "dialog_bg": "#262335", "panel_bg": "#2a2139", "panel_hover": "#463465",
+      "panel_border": "#495495", "input_bg": "#171520", "input_border": "#495495",
+      "text_primary": "#ffffff", "text_secondary": "#e8d9ff", "text_muted": "#a59ac6",
+      "accent": "#ff7edb"
+    },
+    "palette": {
+      "window": "#262335", "window_text": "#ffffff", "base": "#171520",
+      "alternate_base": "#2a2139", "tooltip_base": "#2a2139", "tooltip_text": "#ffffff",
+      "text": "#ffffff", "button": "#2a2139", "button_text": "#ffffff",
+      "bright_text": "#fe4450", "link": "#36f9f6", "highlight": "#463465",
+      "highlighted_text": "#ffffff", "placeholder_text": "#848bbd"
+    }
+  }
+}

@@ -1,7 +1,7 @@
 import os
 
 from PyQt6.QtCore import QSize, Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QIcon, QPixmap
+from PyQt6.QtGui import QFontDatabase, QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -22,37 +22,17 @@ from PyQt6.QtWidgets import (
 )
 
 from .models import DownloadTask
+from .i18n import available_languages
 from .music_paths import build_music_output_template
-from .widgets import DownloadCard, build_rounded_pixmap
+from .themes import available_themes, theme_colors, theme_is_dark
+from .widgets import DownloadCard, ToggleSwitch, build_rounded_pixmap
 from .workers import DownloadWorker, MetadataWorker
 
 
 def dialog_theme_colors(is_dark: bool) -> dict[str, str]:
-    if is_dark:
-        return {
-            "dialog_bg": "#1c1f24",
-            "panel_bg": "#2e3136",
-            "panel_hover": "#373b43",
-            "panel_border": "#3b3f46",
-            "input_bg": "#171717",
-            "input_border": "#303030",
-            "text_primary": "#eef2f7",
-            "text_secondary": "#b4bcc9",
-            "text_muted": "#8f98a6",
-            "accent": "#ff5a63",
-        }
-    return {
-        "dialog_bg": "#eef2f6",
-        "panel_bg": "#ffffff",
-        "panel_hover": "#f5f7fa",
-        "panel_border": "#cad2de",
-        "input_bg": "#ffffff",
-        "input_border": "#cad2de",
-        "text_primary": "#1f2630",
-        "text_secondary": "#475467",
-        "text_muted": "#788292",
-        "accent": "#ff5a63",
-    }
+    if theme_is_dark() == is_dark:
+        return theme_colors("dialog")
+    return theme_colors("dialog", "dark" if is_dark else "light")
 
 
 class SettingsDialog(QDialog):
@@ -63,16 +43,28 @@ class SettingsDialog(QDialog):
         version_text: str,
         active_folder_path: str,
         theme_mode: str,
+        interface_font_family: str,
+        language_code: str,
         open_folder_icon: QIcon,
         choose_folder_icon: QIcon,
+        update_icon: QIcon,
         youtube_cookies_browser: str = "",
         youtube_cookies_file: str = "",
+        crossfade_enabled: bool = False,
+        crossfade_seconds: int = 5,
+        volume_normalization_enabled: bool = False,
+        window_transparency: bool = True,
+        window_blur: bool = True,
+        window_transparency_percent: int = 16,
+        window_blur_radius: int = 20,
+        element_transparency_percent: int = 12,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Настройки")
-        self.resize(700, 320)
+        self.resize(700, 600)
         self.setMinimumWidth(700)
-        self.theme_mode = theme_mode if theme_mode in {"light", "dark"} else "dark"
+        theme_ids = {theme["id"] for theme in available_themes()}
+        self.theme_mode = theme_mode if theme_mode in theme_ids else "dark"
         self.youtube_cookies_file_path = youtube_cookies_file.strip()
 
         root = QVBoxLayout(self)
@@ -84,6 +76,11 @@ class SettingsDialog(QDialog):
         self.github_button = QPushButton("Открыть Github проекта")
         self.github_button.setFixedHeight(30)
         github_row.addWidget(self.github_button)
+        self.update_button = QPushButton("Обновить")
+        self.update_button.setIcon(update_icon)
+        self.update_button.setIconSize(QSize(16, 16))
+        self.update_button.setFixedHeight(30)
+        github_row.addWidget(self.update_button)
         github_row.addStretch(1)
         root.addLayout(github_row)
 
@@ -131,12 +128,33 @@ class SettingsDialog(QDialog):
 
         theme_title = QLabel("Выбор темы приложения")
         self.theme_combo = QComboBox()
-        self.theme_combo.addItem("Светлая", "light")
-        self.theme_combo.addItem("Тёмная", "dark")
+        for theme in available_themes():
+            self.theme_combo.addItem(theme["name"], theme["id"])
         current_index = max(0, self.theme_combo.findData(theme_mode))
         self.theme_combo.setCurrentIndex(current_index)
         grid.addWidget(theme_title, 2, 0)
         grid.addWidget(self.theme_combo, 2, 1)
+
+        font_title = QLabel("Шрифт интерфейса")
+        self.interface_font_combo = QComboBox()
+        self.interface_font_combo.addItem("Системный", "")
+        for font_family in QFontDatabase.families():
+            self.interface_font_combo.addItem(font_family, font_family)
+        font_index = self.interface_font_combo.findData(
+            interface_font_family.strip()
+        )
+        self.interface_font_combo.setCurrentIndex(max(0, font_index))
+        grid.addWidget(font_title, 3, 0)
+        grid.addWidget(self.interface_font_combo, 3, 1)
+
+        language_title = QLabel("Язык приложения")
+        self.language_combo = QComboBox()
+        for language in available_languages(refresh=True):
+            self.language_combo.addItem(language["name"], language["code"])
+        language_index = self.language_combo.findData(language_code)
+        self.language_combo.setCurrentIndex(max(0, language_index))
+        grid.addWidget(language_title, 4, 0)
+        grid.addWidget(self.language_combo, 4, 1)
 
         youtube_title = QLabel("YouTube cookies")
         youtube_panel = QWidget()
@@ -178,8 +196,106 @@ class SettingsDialog(QDialog):
         youtube_file_row.addWidget(self.youtube_cookies_file_value, 1)
         youtube_file_row.addWidget(self.choose_youtube_cookies_button)
         youtube_layout.addLayout(youtube_file_row)
-        grid.addWidget(youtube_title, 3, 0)
-        grid.addWidget(youtube_panel, 3, 1)
+        grid.addWidget(youtube_title, 5, 0)
+        grid.addWidget(youtube_panel, 5, 1)
+
+        sound_title = QLabel("Звук")
+        sound_panel = QWidget()
+        sound_layout = QVBoxLayout(sound_panel)
+        sound_layout.setContentsMargins(0, 0, 0, 0)
+        sound_layout.setSpacing(10)
+        crossfade_row = QHBoxLayout()
+        crossfade_row.addWidget(QLabel("Cross-fade"))
+        crossfade_row.addStretch(1)
+        self.crossfade_switch = ToggleSwitch()
+        self.crossfade_switch.setChecked(crossfade_enabled)
+        crossfade_row.addWidget(self.crossfade_switch)
+        sound_layout.addLayout(crossfade_row)
+        duration_row = QHBoxLayout()
+        duration_row.addWidget(QLabel("Время перехода"))
+        duration_row.addStretch(1)
+        self.crossfade_seconds_spin = QSpinBox()
+        self.crossfade_seconds_spin.setRange(1, 30)
+        self.crossfade_seconds_spin.setSuffix(" сек.")
+        self.crossfade_seconds_spin.setValue(crossfade_seconds)
+        duration_row.addWidget(self.crossfade_seconds_spin)
+        sound_layout.addLayout(duration_row)
+        self.crossfade_seconds_spin.setEnabled(crossfade_enabled)
+        self.crossfade_switch.toggled.connect(
+            self.crossfade_seconds_spin.setEnabled
+        )
+        normalization_row = QHBoxLayout()
+        normalization_row.addWidget(QLabel("Нормализация громкости"))
+        normalization_row.addStretch(1)
+        self.volume_normalization_switch = ToggleSwitch()
+        self.volume_normalization_switch.setChecked(volume_normalization_enabled)
+        normalization_row.addWidget(self.volume_normalization_switch)
+        sound_layout.addLayout(normalization_row)
+        grid.addWidget(sound_title, 6, 0)
+        grid.addWidget(sound_panel, 6, 1)
+
+        window_title = QLabel("Окно")
+        window_panel = QWidget()
+        window_layout = QVBoxLayout(window_panel)
+        window_layout.setContentsMargins(0, 0, 0, 0)
+        window_layout.setSpacing(10)
+        transparency_row = QHBoxLayout()
+        transparency_row.addWidget(QLabel("Прозрачность"))
+        transparency_row.addStretch(1)
+        self.window_transparency_switch = ToggleSwitch()
+        self.window_transparency_switch.setChecked(window_transparency)
+        transparency_row.addWidget(self.window_transparency_switch)
+        window_layout.addLayout(transparency_row)
+        transparency_value_row = QHBoxLayout()
+        transparency_value_row.addWidget(QLabel("Процент прозрачности"))
+        transparency_value_row.addStretch(1)
+        self.window_transparency_percent_spin = QSpinBox()
+        self.window_transparency_percent_spin.setRange(0, 90)
+        self.window_transparency_percent_spin.setSuffix(" %")
+        self.window_transparency_percent_spin.setValue(
+            window_transparency_percent
+        )
+        self.window_transparency_percent_spin.setEnabled(window_transparency)
+        transparency_value_row.addWidget(self.window_transparency_percent_spin)
+        window_layout.addLayout(transparency_value_row)
+        blur_row = QHBoxLayout()
+        blur_row.addWidget(QLabel("Размытие фона"))
+        blur_row.addStretch(1)
+        self.window_blur_switch = ToggleSwitch()
+        self.window_blur_switch.setChecked(window_blur)
+        blur_row.addWidget(self.window_blur_switch)
+        window_layout.addLayout(blur_row)
+        blur_value_row = QHBoxLayout()
+        blur_value_row.addWidget(QLabel("Радиус размытия"))
+        blur_value_row.addStretch(1)
+        self.window_blur_radius_spin = QSpinBox()
+        self.window_blur_radius_spin.setRange(0, 50)
+        self.window_blur_radius_spin.setSuffix(" px")
+        self.window_blur_radius_spin.setValue(window_blur_radius)
+        self.window_blur_radius_spin.setEnabled(window_blur)
+        blur_value_row.addWidget(self.window_blur_radius_spin)
+        window_layout.addLayout(blur_value_row)
+        element_transparency_row = QHBoxLayout()
+        element_transparency_row.addWidget(QLabel("Прозрачность элементов"))
+        element_transparency_row.addStretch(1)
+        self.element_transparency_percent_spin = QSpinBox()
+        self.element_transparency_percent_spin.setRange(0, 90)
+        self.element_transparency_percent_spin.setSuffix(" %")
+        self.element_transparency_percent_spin.setValue(
+            element_transparency_percent
+        )
+        element_transparency_row.addWidget(
+            self.element_transparency_percent_spin
+        )
+        window_layout.addLayout(element_transparency_row)
+        self.window_transparency_switch.toggled.connect(
+            self.window_transparency_percent_spin.setEnabled
+        )
+        self.window_blur_switch.toggled.connect(
+            self.window_blur_radius_spin.setEnabled
+        )
+        grid.addWidget(window_title, 7, 0)
+        grid.addWidget(window_panel, 7, 1)
 
         root.addLayout(grid)
         root.addStretch(1)
@@ -191,15 +307,40 @@ class SettingsDialog(QDialog):
         if close_button is not None:
             close_button.setText("Закрыть")
         root.addWidget(buttons)
+        for button in self.findChildren(QPushButton):
+            button.setAutoDefault(False)
+            button.setDefault(False)
         self.apply_theme()
 
     def selected_theme_mode(self) -> str:
         return str(self.theme_combo.currentData() or "dark")
 
+    def selected_interface_font_family(self) -> str:
+        return str(self.interface_font_combo.currentData() or "").strip()
+
+    def selected_language_code(self) -> str:
+        return str(self.language_combo.currentData() or "ru").strip().lower()
+
     def youtube_auth_values(self) -> tuple[str, str]:
         return (
             str(self.youtube_browser_combo.currentData() or "").strip(),
             self.youtube_cookies_file_path,
+        )
+
+    def audio_values(self) -> tuple[bool, int, bool]:
+        return (
+            self.crossfade_switch.isChecked(),
+            self.crossfade_seconds_spin.value(),
+            self.volume_normalization_switch.isChecked(),
+        )
+
+    def window_effect_values(self) -> tuple[bool, bool, int, int, int]:
+        return (
+            self.window_transparency_switch.isChecked(),
+            self.window_blur_switch.isChecked(),
+            self.window_transparency_percent_spin.value(),
+            self.window_blur_radius_spin.value(),
+            self.element_transparency_percent_spin.value(),
         )
 
     def choose_youtube_cookies_file(self) -> None:
@@ -216,7 +357,7 @@ class SettingsDialog(QDialog):
 
     def set_theme_mode(self, mode: str) -> None:
         normalized_mode = str(mode or "").strip().lower()
-        if normalized_mode in {"light", "dark"}:
+        if normalized_mode in {theme["id"] for theme in available_themes()}:
             self.theme_mode = normalized_mode
 
     def set_active_folder_path(self, path: str) -> None:
@@ -227,13 +368,15 @@ class SettingsDialog(QDialog):
         self.choose_folder_button.setIcon(choose_folder_icon)
 
     def is_dark_theme(self) -> bool:
-        return self.theme_mode == "dark"
+        return theme_is_dark(self.theme_mode)
 
     def apply_theme(self) -> None:
         colors = dialog_theme_colors(self.is_dark_theme())
         panel_bg = colors["panel_bg"]
         panel_hover = colors["panel_hover"]
         panel_border = colors["panel_border"]
+        input_bg = colors["input_bg"]
+        input_border = colors["input_border"]
         text_primary = colors["text_primary"]
         text_secondary = colors["text_secondary"]
         self.setStyleSheet(
@@ -254,7 +397,7 @@ class SettingsDialog(QDialog):
             f"QDialogButtonBox QPushButton:hover {{ background:{panel_hover}; }}"
         )
 
-        self.github_button.setStyleSheet(
+        repository_button_style = (
             "QPushButton {"
             f"background:{panel_bg};"
             f"border:1px solid {panel_border};"
@@ -266,6 +409,8 @@ class SettingsDialog(QDialog):
             "}"
             f"QPushButton:hover {{ background:{panel_hover}; }}"
         )
+        self.github_button.setStyleSheet(repository_button_style)
+        self.update_button.setStyleSheet(repository_button_style)
         tool_style = (
             "QToolButton {"
             f"background:{panel_bg};"
@@ -290,8 +435,8 @@ class SettingsDialog(QDialog):
         )
         self.theme_combo.setStyleSheet(
             "QComboBox {"
-            f"background:{panel_bg};"
-            f"border:1px solid {panel_border};"
+            f"background:{input_bg};"
+            f"border:1px solid {input_border};"
             "border-radius:8px;"
             f"color:{text_primary};"
             "padding:6px 10px;"
@@ -299,14 +444,30 @@ class SettingsDialog(QDialog):
             "}"
             "QComboBox::drop-down { border:none; width:28px; }"
             "QComboBox QAbstractItemView {"
-            f"background:{panel_bg};"
-            f"border:1px solid {panel_border};"
+            f"background:{input_bg};"
+            f"border:1px solid {input_border};"
             f"color:{text_primary};"
             "selection-background-color:"
             f"{panel_hover};"
             "}"
         )
         self.youtube_browser_combo.setStyleSheet(self.theme_combo.styleSheet())
+        self.interface_font_combo.setStyleSheet(self.theme_combo.styleSheet())
+        self.language_combo.setStyleSheet(self.theme_combo.styleSheet())
+        self.crossfade_switch.set_dark_theme(self.is_dark_theme())
+        self.volume_normalization_switch.set_dark_theme(self.is_dark_theme())
+        self.window_transparency_switch.set_dark_theme(self.is_dark_theme())
+        self.window_blur_switch.set_dark_theme(self.is_dark_theme())
+        self.crossfade_seconds_spin.setStyleSheet(self.theme_combo.styleSheet())
+        self.window_transparency_percent_spin.setStyleSheet(
+            self.theme_combo.styleSheet()
+        )
+        self.window_blur_radius_spin.setStyleSheet(
+            self.theme_combo.styleSheet()
+        )
+        self.element_transparency_percent_spin.setStyleSheet(
+            self.theme_combo.styleSheet()
+        )
 
 
 class MetadataDialog(QDialog):
@@ -355,7 +516,7 @@ class MetadataDialog(QDialog):
         self.pick_cover_button.setStyleSheet(
             "QToolButton {"
             "background:#32363d;"
-            "border:1px solid #4a515c;"
+            "border:1px solid #555555;"
             "border-radius:10px;"
             "}"
             "QToolButton:hover { background:#3b414b; }"
@@ -371,7 +532,7 @@ class MetadataDialog(QDialog):
         self.clear_cover_button.setStyleSheet(
             "QToolButton {"
             "background:#32363d;"
-            "border:1px solid #4a515c;"
+            "border:1px solid #555555;"
             "border-radius:10px;"
             "}"
             "QToolButton:hover { background:#3b414b; }"
@@ -753,9 +914,9 @@ class ExperimentalImportDialog(QDialog):
         self.start_button.setFixedHeight(38)
         self.start_button.setMinimumWidth(160)
         self.start_button.setStyleSheet(
-            "QPushButton { background:#2e3136; border:1px solid #3b3f46; border-radius:10px; color:#eef2f7; font-size:13px; font-weight:700; padding:0 18px; }"
-            "QPushButton:hover { background:#373b43; }"
-            "QPushButton:disabled { background:#2a2d33; border-color:#353941; color:#8b93a0; }"
+            "QPushButton { background:#303030; border:1px solid #464646; border-radius:10px; color:#eef2f7; font-size:13px; font-weight:700; padding:0 18px; }"
+            "QPushButton:hover { background:#3a3a3a; }"
+            "QPushButton:disabled { background:#292929; border-color:#383838; color:#929292; }"
         )
         self.start_button.clicked.connect(self.start_downloads)
         bottom.addWidget(self.start_button)

@@ -1,0 +1,29 @@
+{
+  "id": "dracula",
+  "name": "Dracula",
+  "base": "dark",
+  "colors": {
+    "main": {
+      "app_bg": "#282a36", "button_bg": "#44475a", "button_hover": "#53576e",
+      "button_border": "#6272a4", "button_disabled_bg": "#343642",
+      "button_disabled_border": "#44475a", "button_disabled_text": "#7d86ad",
+      "panel_bg": "#343642", "panel_border": "#44475a", "list_bg": "#21222c",
+      "text_primary": "#f8f8f2", "text_secondary": "#e2e2dc", "text_muted": "#9da5c7",
+      "checkbox_bg": "#44475a", "checkbox_border": "#6272a4", "checkbox_checked": "#bd93f9",
+      "progress_bg": "#343642", "progress_border": "#6272a4", "footer_text": "#e2e2dc"
+    },
+    "dialog": {
+      "dialog_bg": "#282a36", "panel_bg": "#343642", "panel_hover": "#44475a",
+      "panel_border": "#6272a4", "input_bg": "#21222c", "input_border": "#44475a",
+      "text_primary": "#f8f8f2", "text_secondary": "#e2e2dc", "text_muted": "#9da5c7",
+      "accent": "#bd93f9"
+    },
+    "palette": {
+      "window": "#282a36", "window_text": "#f8f8f2", "base": "#21222c",
+      "alternate_base": "#343642", "tooltip_base": "#44475a", "tooltip_text": "#f8f8f2",
+      "text": "#f8f8f2", "button": "#44475a", "button_text": "#f8f8f2",
+      "bright_text": "#ff5555", "link": "#8be9fd", "highlight": "#6272a4",
+      "highlighted_text": "#f8f8f2", "placeholder_text": "#7d86ad"
+    }
+  }
+}

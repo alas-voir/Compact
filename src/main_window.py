@@ -1,4 +1,5 @@
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -6,7 +7,20 @@ import urllib.request
 
 import yt_dlp
 from PyQt6.QtCore import QEvent, QRectF, QSize, Qt, QThread, QTimer, QUrl
-from PyQt6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPalette, QPixmap
+from PyQt6.QtGui import (
+    QAction,
+    QColor,
+    QDesktopServices,
+    QFont,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPainterPath,
+    QPalette,
+    QPixmap,
+    QRegion,
+)
+from PyQt6.QtMultimedia import QAudioOutput, QMediaDevices, QMediaPlayer
 
 try:
     from PyQt6.QtSvg import QSvgRenderer
@@ -15,6 +29,7 @@ except ImportError:
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -33,7 +48,10 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
+    QSlider,
     QSplitter,
+    QStackedWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -46,7 +64,13 @@ from .dialogs import (
     SliceSegmentsDialog,
     dialog_theme_colors,
 )
+from .audio_normalization import replaygain_volume_factor
 from .logger import app_log_path, get_logger
+from .i18n import (
+    install_language_event_filter,
+    retranslate_all,
+    set_language,
+)
 from .library_scanner import load_music_track, scan_music_directory
 from .manual_playlist import (
     append_tracks_to_manual_playlist,
@@ -76,6 +100,7 @@ from .music_paths import (
     build_music_output_template,
     ensure_unique_music_file_path,
 )
+from .now_playing import MacOSNowPlaying
 from .paths import resource_path
 from .playlist_storage import (
     delete_playlist,
@@ -84,25 +109,47 @@ from .playlist_storage import (
     save_playlist,
 )
 from .settings import (
+    load_audio_settings,
+    load_window_effect_settings,
     load_elenveil_root_dir,
+    load_interface_font_family,
+    load_language_code,
     load_theme_mode,
     load_youtube_auth_settings,
+    load_playback_session,
     save_elenveil_root_dir,
+    save_interface_font_family,
+    save_language_code,
     save_theme_mode,
     save_youtube_auth_settings,
+    save_playback_session,
+    save_audio_settings,
+    save_window_effect_settings,
+)
+from .themes import load_theme, set_active_theme, theme_colors, theme_is_dark
+from .updater import (
+    ReleaseCheckWorker,
+    ReleaseDownloadWorker,
+    launch_downloaded_update,
 )
 from .widgets import (
     AddCard,
     BackChevronButton,
+    ClickableLabel,
     DownloadCard,
     DownloadQueueCard,
+    DialogTitleBar,
     HomeAuthorCard,
     HoverCoverLabel,
     PlaylistListItemWidget,
+    PlaybackQueueTrackCard,
     RemoteTrackCard,
+    RotatingDiscWidget,
     SearchAlbumCard,
     SearchAuthorCard,
     SearchPlaylistCard,
+    set_element_background_transparency,
+    SeekProgressBar,
 )
 from .workers import (
     DownloadWorker,
@@ -117,19 +164,48 @@ from .youtube_urls import normalize_youtube_track_url
 
 
 class MainWindow(QMainWindow):
-    PROJECT_VERSION = "0.5.1"
-    PROJECT_GITHUB_URL = "https://github.com/ZERv3/Elenveil"
+    PROJECT_VERSION = "0.8.0"
+    PROJECT_GITHUB_URL = "https://github.com/ZERv3/Compact"
 
     def __init__(self) -> None:
         super().__init__()
+        self.setAttribute(
+            Qt.WidgetAttribute.WA_ContentsMarginsRespectsSafeArea, False
+        )
+        if sys.platform == "darwin":
+            self.setAttribute(
+                Qt.WidgetAttribute.WA_TranslucentBackground, True
+            )
         self.logger = get_logger("elenveil.main_window")
-        self.setWindowTitle("Elenveil")
+        self.setWindowTitle("Compact")
         self.resize(1180, 720)
         self.startup_root_dir_warning = ""
+        self.native_titlebar_configured = False
+        self.palette_change_in_progress = False
+        self.theme_switch_in_progress = False
+        self.ignore_next_theme_palette_change = False
+        self.system_interface_font = QFont(QApplication.font())
+        self.interface_font_family = load_interface_font_family()
+        self.apply_interface_font()
+        self.language_code = set_language(load_language_code())
+        install_language_event_filter()
         loaded_theme_mode = load_theme_mode()
         self.theme_mode = loaded_theme_mode or (
             "dark" if self._palette_is_dark(self.palette()) else "light"
         )
+        try:
+            self.theme_mode = set_active_theme(self.theme_mode)["id"]
+        except RuntimeError:
+            self.theme_mode = "dark"
+            set_active_theme(self.theme_mode)
+        (
+            self.window_transparency_enabled,
+            self.window_blur_enabled,
+            self.window_transparency_percent,
+            self.window_blur_radius,
+            self.element_transparency_percent,
+        ) = load_window_effect_settings()
+        set_element_background_transparency(self.element_transparency_percent)
         self.apply_theme_mode(self.theme_mode, persist=False, update_ui=False)
 
         self.tasks: list[DownloadTask] = []
@@ -160,6 +236,7 @@ class MainWindow(QMainWindow):
         self.open_folder_icon = QIcon()
         self.reveal_icon = QIcon()
         self.gear_icon = QIcon()
+        self.update_icon = QIcon()
         self.add_playlist_icon = QIcon()
         self.add_track_icon = QIcon()
         self.add_list_icon = QIcon()
@@ -176,8 +253,74 @@ class MainWindow(QMainWindow):
         self.choose_folder_icon = QIcon()
         self.sort_date_icon = QIcon()
         self.sort_title_icon = QIcon()
+        self.play_icon = QIcon()
+        self.pause_icon = QIcon()
+        self.previous_icon = QIcon()
+        self.next_icon = QIcon()
+        self.download_icon = QIcon()
+        self.volume_off_icon = QIcon()
+        self.volume_mid_icon = QIcon()
+        self.volume_max_icon = QIcon()
+        self.script_icon = QIcon()
+        self.queue_icon = QIcon()
+        self.history_icon = QIcon()
+        self.loop_icon = QIcon()
+        self.shuffle_icon = QIcon()
+        self.monitor_icon = QIcon()
+        self.headphones_icon = QIcon()
         self.status_icons: dict[str, QIcon] = {}
         self.reload_theme_icons()
+
+        self.audio_output = QAudioOutput(self)
+        self.system_now_playing = MacOSNowPlaying()
+        self.system_now_playing.command_received.connect(
+            self.on_system_media_command
+        )
+        app_for_now_playing = QApplication.instance()
+        if app_for_now_playing is not None:
+            app_for_now_playing.aboutToQuit.connect(
+                self.handle_app_about_to_quit
+            )
+        self.media_devices = QMediaDevices(self)
+        self.audio_player = QMediaPlayer(self)
+        self.audio_player.setAudioOutput(self.audio_output)
+        self.audio_output.setVolume(1.0)
+        self.crossfade_player = QMediaPlayer(self)
+        self.crossfade_audio_output = QAudioOutput(self)
+        self.crossfade_player.setAudioOutput(self.crossfade_audio_output)
+        self.crossfade_audio_output.setVolume(0.0)
+        (
+            self.crossfade_enabled,
+            self.crossfade_seconds,
+            self.volume_normalization_enabled,
+        ) = load_audio_settings()
+        self.crossfade_active = False
+        self.crossfade_elapsed_ms = 0
+        self.crossfade_target_index = -1
+        self.crossfade_target_path = ""
+        self.crossfade_timer = QTimer(self)
+        self.crossfade_timer.setInterval(40)
+        self.crossfade_timer.timeout.connect(self.advance_crossfade)
+        self.playback_track_path = ""
+        self.playback_queue: list[str] = []
+        self.playback_source_queue: list[str] = []
+        self.playback_queue_index = -1
+        self.playback_history: list[str] = []
+        self.playback_log: list[str] = []
+        self.repeat_mode = 0
+        self.shuffle_enabled = False
+        self.last_nonzero_volume = 100
+        self.right_panel_mode = "playback"
+        self.playback_panel_track_path = ""
+        self.playback_context_title = ""
+        self.pending_disc_transition_direction = 1
+        self.pending_restore_position_ms = -1
+        self.audio_player.positionChanged.connect(self.on_playback_position_changed)
+        self.audio_player.durationChanged.connect(self.on_playback_duration_changed)
+        self.audio_player.playbackStateChanged.connect(self.on_playback_state_changed)
+        self.audio_player.mediaStatusChanged.connect(self.on_playback_media_status_changed)
+        self.audio_player.errorOccurred.connect(self.on_playback_error)
+        self.media_devices.audioOutputsChanged.connect(self.rebuild_audio_output_menu)
 
         self.metadata_thread: QThread | None = None
         self.metadata_worker: MetadataWorker | None = None
@@ -215,7 +358,7 @@ class MainWindow(QMainWindow):
         self.search_album_tracks: list[LocalMusicTrack] = []
         self.search_results_active = False
         self.last_search_query = ""
-        self.library_view_mode = "playlists"
+        self.library_view_mode = "authors"
         self.selected_author_name: str | None = None
         self.selected_album_name: str | None = None
         self.author_sidebar_transition_guard = False
@@ -243,14 +386,20 @@ class MainWindow(QMainWindow):
 
         root = QWidget()
         root.setObjectName("appRoot")
+        root.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        root.setAttribute(
+            Qt.WidgetAttribute.WA_ContentsMarginsRespectsSafeArea, False
+        )
         self.root_widget = root
         layout = QVBoxLayout(root)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
 
         self.select_elenveil_root_button = QPushButton()
-        self.select_elenveil_root_button.setToolTip("Выбрать папку Elenveil")
-        self.select_elenveil_root_button.setAccessibleName("Выбрать папку Elenveil")
+        self.select_elenveil_root_button.setToolTip("Выбрать папку библиотеки")
+        self.select_elenveil_root_button.setAccessibleName("Выбрать папку библиотеки")
         self.select_elenveil_root_button.setFixedSize(36, 36)
         self.select_elenveil_root_button.setStyleSheet(
             "QPushButton { background:#2e3136; border:1px solid #3b3f46; border-radius:8px; }"
@@ -261,8 +410,8 @@ class MainWindow(QMainWindow):
             self.choose_elenveil_root_directory
         )
         self.open_music_folder_button = QPushButton()
-        self.open_music_folder_button.setToolTip("Открыть папку Elenveil")
-        self.open_music_folder_button.setAccessibleName("Открыть папку Elenveil")
+        self.open_music_folder_button.setToolTip("Открыть папку библиотеки")
+        self.open_music_folder_button.setAccessibleName("Открыть папку библиотеки")
         self.open_music_folder_button.setFixedSize(36, 36)
         self.open_music_folder_button.setStyleSheet(
             "QPushButton { background:#2e3136; border:1px solid #3b3f46; border-radius:8px; }"
@@ -270,11 +419,10 @@ class MainWindow(QMainWindow):
             "QPushButton:disabled { background:#2a2d33; border-color:#353941; }"
         )
         self.open_music_folder_button.clicked.connect(self.open_elenveil_music_folder)
-        self.create_playlist_button = QPushButton("Добавить")
+        self.create_playlist_button = QPushButton()
         self.create_playlist_button.setToolTip("Добавить")
         self.create_playlist_button.setAccessibleName("Добавить")
-        self.create_playlist_button.setFixedHeight(36)
-        self.create_playlist_button.setMinimumWidth(110)
+        self.create_playlist_button.setFixedSize(40, 40)
         self.create_playlist_button.setMenu(self.build_add_menu())
 
         self.import_button = QPushButton()
@@ -326,11 +474,14 @@ class MainWindow(QMainWindow):
         self.scroll_area.setWidget(self.cards_container)
 
         self.experimental_page = QWidget()
+        self.experimental_page.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         experimental_page_layout = QVBoxLayout(self.experimental_page)
         experimental_page_layout.setContentsMargins(0, 0, 0, 0)
         experimental_page_layout.setSpacing(8)
         self.experimental_footer_widget = QWidget()
-        self.experimental_footer_widget.setFixedHeight(44)
+        self.experimental_footer_widget.setFixedHeight(64)
         self.experimental_footer_widget.setVisible(True)
         self.experimental_footer_layout = QHBoxLayout()
         self.experimental_footer_layout.setContentsMargins(0, 0, 0, 0)
@@ -342,14 +493,27 @@ class MainWindow(QMainWindow):
         self.settings_button.setAccessibleName("Настройки")
         self.settings_button.setFixedSize(32, 32)
         self.settings_button.clicked.connect(self.show_settings_dialog)
-        self.downloads_button = QPushButton("Загрузки")
-        self.downloads_button.setFixedHeight(32)
+        self.settings_shortcut_action = QAction(self)
+        # Qt maps Control to the Command key in native macOS shortcuts.
+        self.settings_shortcut_action.setShortcut(QKeySequence("Ctrl+,"))
+        self.settings_shortcut_action.setShortcutContext(
+            Qt.ShortcutContext.WindowShortcut
+        )
+        self.settings_shortcut_action.triggered.connect(
+            self.show_settings_dialog
+        )
+        self.addAction(self.settings_shortcut_action)
+        self.downloads_button = QPushButton()
+        self.downloads_button.setToolTip("Загрузки")
+        self.downloads_button.setAccessibleName("Загрузки")
+        self.downloads_button.setFixedSize(32, 32)
+        self.downloads_button.setIconSize(QSize(18, 18))
         self.downloads_button.clicked.connect(self.show_downloads_menu)
 
         self.footer_left_section = QWidget()
         self.footer_left_layout = QHBoxLayout(self.footer_left_section)
         self.footer_left_layout.setContentsMargins(0, 0, 0, 0)
-        self.footer_left_layout.setSpacing(0)
+        self.footer_left_layout.setSpacing(8)
         self.footer_left_layout.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
@@ -358,19 +522,126 @@ class MainWindow(QMainWindow):
             0,
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
         )
+        self.footer_left_layout.addWidget(
+            self.downloads_button,
+            0,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+        )
         self.footer_left_layout.addStretch(1)
 
         self.footer_center_section = QWidget()
-        self.footer_center_layout = QHBoxLayout(self.footer_center_section)
-        self.footer_center_layout.setContentsMargins(12, 6, 12, 6)
-        self.footer_center_layout.setSpacing(8)
-        self.footer_center_layout.addStretch(1)
+        self.footer_center_layout = QVBoxLayout(self.footer_center_section)
+        self.footer_center_layout.setContentsMargins(12, 5, 12, 5)
+        self.footer_center_layout.setSpacing(4)
+
+        self.footer_playback_controls = QWidget()
+        self.footer_playback_controls_layout = QHBoxLayout(
+            self.footer_playback_controls
+        )
+        self.footer_playback_controls_layout.setContentsMargins(0, 0, 0, 0)
+        self.footer_playback_controls_layout.setSpacing(14)
+        self.footer_previous_button = QToolButton()
+        self.footer_previous_button.setToolTip("Предыдущий трек")
+        self.footer_previous_button.setAccessibleName("Предыдущий трек")
+        self.footer_previous_button.setFixedSize(28, 28)
+        self.footer_previous_button.setIconSize(QSize(18, 18))
+        self.footer_previous_button.clicked.connect(self.play_previous_track)
+        self.footer_shuffle_button = QToolButton()
+        self.footer_shuffle_button.setToolTip("Перемешивание")
+        self.footer_shuffle_button.setAccessibleName("Перемешивание")
+        self.footer_shuffle_button.setFixedSize(28, 28)
+        self.footer_shuffle_button.setIconSize(QSize(18, 18))
+        self.footer_shuffle_button.clicked.connect(self.toggle_shuffle_mode)
+        self.footer_play_button = QToolButton()
+        self.footer_play_button.setToolTip("Воспроизвести")
+        self.footer_play_button.setAccessibleName("Воспроизвести или приостановить")
+        self.footer_play_button.setFixedSize(32, 28)
+        self.footer_play_button.setIconSize(QSize(22, 22))
+        self.footer_play_button.clicked.connect(self.toggle_footer_playback)
+        self.footer_next_button = QToolButton()
+        self.footer_next_button.setToolTip("Следующий трек")
+        self.footer_next_button.setAccessibleName("Следующий трек")
+        self.footer_next_button.setFixedSize(28, 28)
+        self.footer_next_button.setIconSize(QSize(18, 18))
+        self.footer_next_button.clicked.connect(self.play_next_track)
+        self.footer_repeat_button = QToolButton()
+        self.footer_repeat_button.setToolTip("Повтор выключен")
+        self.footer_repeat_button.setAccessibleName("Режим повтора")
+        self.footer_repeat_button.setFixedSize(28, 28)
+        self.footer_repeat_button.setIconSize(QSize(18, 18))
+        self.footer_repeat_button.clicked.connect(self.cycle_repeat_mode)
+        self.footer_repeat_badge = QLabel("1", self.footer_repeat_button)
+        self.footer_repeat_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.footer_repeat_badge.setFixedSize(11, 11)
+        self.footer_repeat_badge.move(16, 1)
+        self.footer_repeat_badge.setVisible(False)
+        self.footer_repeat_badge.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents
+        )
+        self.footer_playback_controls_layout.addStretch(1)
+        self.footer_playback_controls_layout.addWidget(self.footer_shuffle_button)
+        self.footer_playback_controls_layout.addWidget(self.footer_previous_button)
+        self.footer_playback_controls_layout.addWidget(self.footer_play_button)
+        self.footer_playback_controls_layout.addWidget(self.footer_next_button)
+        self.footer_playback_controls_layout.addWidget(self.footer_repeat_button)
+        self.footer_playback_controls_layout.addStretch(1)
+        self.footer_center_layout.addWidget(self.footer_playback_controls)
+
+        self.footer_playback_progress = SeekProgressBar()
+        self.footer_playback_progress.setRange(0, 1000)
+        self.footer_playback_progress.setValue(0)
+        self.footer_playback_progress.setTextVisible(False)
+        self.footer_playback_progress.setFixedHeight(9)
+        self.footer_playback_progress.seek_requested.connect(self.seek_playback)
+        self.footer_center_layout.addWidget(self.footer_playback_progress)
 
         self.footer_right_section = QWidget()
         self.footer_right_layout = QHBoxLayout(self.footer_right_section)
         self.footer_right_layout.setContentsMargins(12, 6, 12, 6)
         self.footer_right_layout.setSpacing(8)
         self.footer_right_layout.addStretch(1)
+        self.footer_audio_output_button = QPushButton()
+        self.footer_audio_output_button.setToolTip("Выход звука")
+        self.footer_audio_output_button.setAccessibleName("Выбор выхода звука")
+        self.footer_audio_output_button.setFixedSize(32, 32)
+        self.footer_audio_output_button.setIconSize(QSize(18, 18))
+        audio_output_menu = self.build_audio_output_menu()
+        self.footer_audio_output_button.setMenu(audio_output_menu)
+        audio_output_menu.aboutToShow.connect(
+            lambda: self.position_footer_menu_above(
+                self.footer_audio_output_button, audio_output_menu
+            )
+        )
+        self.footer_script_button = QPushButton()
+        self.footer_script_button.setToolTip("Режим правого раздела")
+        self.footer_script_button.setAccessibleName("Режим правого раздела")
+        self.footer_script_button.setFixedSize(32, 32)
+        self.footer_script_button.setIconSize(QSize(18, 18))
+        script_menu = self.build_footer_script_menu()
+        self.footer_script_button.setMenu(script_menu)
+        script_menu.aboutToShow.connect(
+            lambda: self.position_footer_menu_above(
+                self.footer_script_button, script_menu
+            )
+        )
+        self.footer_volume_button = QPushButton()
+        self.footer_volume_button.setToolTip("Выключить звук")
+        self.footer_volume_button.setAccessibleName("Выключить или вернуть звук")
+        self.footer_volume_button.setFixedSize(28, 28)
+        self.footer_volume_button.setIconSize(QSize(18, 18))
+        self.footer_volume_button.clicked.connect(self.toggle_audio_mute)
+        self.footer_volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self.footer_volume_slider.setRange(0, 100)
+        self.footer_volume_slider.setValue(100)
+        self.footer_volume_slider.setSingleStep(2)
+        self.footer_volume_slider.setPageStep(10)
+        self.footer_volume_slider.setFixedWidth(105)
+        self.footer_volume_slider.setToolTip("Громкость: 100%")
+        self.footer_volume_slider.valueChanged.connect(self.set_audio_volume)
+        self.footer_right_layout.addWidget(self.footer_audio_output_button)
+        self.footer_right_layout.addWidget(self.footer_script_button)
+        self.footer_right_layout.addWidget(self.footer_volume_button)
+        self.footer_right_layout.addWidget(self.footer_volume_slider)
 
         self.sort_date_button = self.create_text_header_button("")
         self.sort_title_button = self.create_text_header_button("")
@@ -436,17 +707,20 @@ class MainWindow(QMainWindow):
         self.playlists_panel.setStyleSheet("background:transparent; border:none;")
         playlists_root_layout = QVBoxLayout(self.playlists_panel)
         playlists_root_layout.setContentsMargins(0, 0, 0, 0)
-        playlists_root_layout.setSpacing(8)
+        playlists_root_layout.setSpacing(0)
 
+        self.macos_traffic_light_spacer = self.create_macos_traffic_light_widget()
         self.playlists_controls_panel, playlists_controls_layout = (
             self.create_section_panel(
-                self.library_view_button,
-                right_header_widgets=[
-                    self.create_playlist_button,
+                "",
+                left_header_widgets=[
+                    self.macos_traffic_light_spacer,
+                    self.library_view_button,
                 ],
+                right_header_widgets=[self.create_playlist_button],
             )
         )
-        playlists_root_layout.addWidget(self.playlists_controls_panel)
+        self.playlists_controls_panel.setObjectName("playlists_controls_inner")
         self.author_context_row = QWidget()
         self.author_context_row.setFixedHeight(30)
         self.author_context_row_layout = QHBoxLayout(self.author_context_row)
@@ -468,19 +742,36 @@ class MainWindow(QMainWindow):
             0,
             Qt.AlignmentFlag.AlignVCenter,
         )
-        playlists_root_layout.addWidget(self.author_context_row)
         self.playlist_list_panel = QFrame()
+        self.playlist_list_panel.setObjectName("playlist_list_inner")
         self.playlist_list_panel_layout = QVBoxLayout(self.playlist_list_panel)
         self.playlist_list_panel_layout.setContentsMargins(12, 12, 12, 12)
         self.playlist_list_panel_layout.setSpacing(10)
         self.playlist_list = QListWidget()
+        self.playlist_list.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.playlist_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         self.playlist_list.setStyleSheet(
             "QListWidget { background:#20242a; border:none; padding:6px; }"
             "QListWidget::item { padding:0; margin:0 0 8px 0; border:none; }"
             "QListWidget::item:selected { background:transparent; }"
         )
         self.playlist_list_panel_layout.addWidget(self.playlist_list)
-        playlists_root_layout.addWidget(self.playlist_list_panel, 1)
+        self.playlists_unified_panel = QFrame()
+        self.playlists_unified_panel.setObjectName("playlists_unified_panel")
+        self.playlists_unified_layout = QVBoxLayout(self.playlists_unified_panel)
+        self.playlists_unified_layout.setContentsMargins(0, 0, 0, 0)
+        self.playlists_unified_layout.setSpacing(0)
+        self.playlists_unified_layout.addWidget(self.playlists_controls_panel)
+        self.playlists_section_separator = QFrame()
+        self.playlists_section_separator.setObjectName("playlists_section_separator")
+        self.playlists_section_separator.setFixedHeight(1)
+        self.playlists_unified_layout.addWidget(self.playlists_section_separator)
+        self.playlists_unified_layout.addWidget(self.playlist_list_panel, 1)
+        playlists_root_layout.addWidget(self.playlists_unified_panel, 1)
 
         self.tracks_panel = QWidget()
         self.tracks_panel.setStyleSheet("background:transparent; border:none;")
@@ -495,9 +786,15 @@ class MainWindow(QMainWindow):
         tracks_search_layout = QHBoxLayout(self.tracks_search_panel)
         tracks_search_layout.setContentsMargins(12, 10, 12, 10)
         tracks_search_layout.setSpacing(8)
-        tracks_search_layout.addWidget(self.home_button, 0)
-        tracks_search_layout.addWidget(self.track_search_edit, 1)
-        tracks_search_layout.addWidget(self.track_search_filter_button, 0)
+        tracks_search_layout.addWidget(
+            self.home_button, 0, Qt.AlignmentFlag.AlignVCenter
+        )
+        tracks_search_layout.addWidget(
+            self.track_search_edit, 1, Qt.AlignmentFlag.AlignVCenter
+        )
+        tracks_search_layout.addWidget(
+            self.track_search_filter_button, 0, Qt.AlignmentFlag.AlignVCenter
+        )
         tracks_layout.addWidget(self.tracks_search_panel)
 
         self.tracks_toolbar_strip = QWidget()
@@ -510,6 +807,11 @@ class MainWindow(QMainWindow):
         self.tracks_toolbar_layout.addWidget(self.start_button, 0)
         self.tracks_toolbar_layout.addWidget(self.sort_date_button, 0)
         self.tracks_toolbar_layout.addWidget(self.sort_title_button, 0)
+        self.tracks_context_label = QLabel("", self.tracks_toolbar_strip)
+        self.tracks_context_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.tracks_context_label.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents
+        )
         tracks_layout.addWidget(self.tracks_toolbar_strip)
 
         self.tracks_list_panel = QFrame()
@@ -534,7 +836,15 @@ class MainWindow(QMainWindow):
         tracks_list_layout.addWidget(self.playlist_tracks_scroll)
         tracks_layout.addWidget(self.tracks_list_panel, 1)
 
-        self.metadata_panel, metadata_layout = self.create_section_panel("")
+        self.metadata_panel = QFrame()
+        self.metadata_panel.setObjectName("metadata_panel")
+        self.metadata_panel.setMinimumWidth(0)
+        self.metadata_panel.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        metadata_layout = QVBoxLayout(self.metadata_panel)
+        metadata_layout.setContentsMargins(0, 0, 0, 0)
+        metadata_layout.setSpacing(10)
         self.metadata_panel_cover_path = ""
         self.metadata_panel_cover_mode = "keep"
         self.metadata_panel_dirty = False
@@ -549,6 +859,10 @@ class MainWindow(QMainWindow):
 
         self.metadata_album_section = QFrame()
         self.metadata_album_section.setObjectName("metadata_subsection")
+        self.metadata_album_section.setMinimumWidth(0)
+        self.metadata_album_section.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
         self.metadata_album_section_layout = QVBoxLayout(self.metadata_album_section)
         self.metadata_album_section_layout.setContentsMargins(10, 10, 10, 10)
         self.metadata_album_section_layout.setSpacing(10)
@@ -580,6 +894,9 @@ class MainWindow(QMainWindow):
         )
         self.metadata_album_form.setHorizontalSpacing(10)
         self.metadata_album_form.setVerticalSpacing(10)
+        self.metadata_album_form.setRowWrapPolicy(
+            QFormLayout.RowWrapPolicy.WrapLongRows
+        )
 
         self.metadata_album_title_label = QLabel("Альбом")
         self.metadata_album_title_edit = QLineEdit()
@@ -624,7 +941,7 @@ class MainWindow(QMainWindow):
         self.metadata_album_buttons.setContentsMargins(0, 6, 0, 0)
         self.metadata_album_buttons.setSpacing(10)
         self.metadata_album_buttons.addStretch(1)
-        self.metadata_album_cancel_button = self.create_square_icon_button("Отмена")
+        self.metadata_album_cancel_button = self.create_square_icon_button("Вернуть")
         self.metadata_album_cancel_button.clicked.connect(
             self.cancel_album_metadata_panel_changes
         )
@@ -638,6 +955,10 @@ class MainWindow(QMainWindow):
 
         self.metadata_track_section = QFrame()
         self.metadata_track_section.setObjectName("metadata_subsection")
+        self.metadata_track_section.setMinimumWidth(0)
+        self.metadata_track_section.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
         self.metadata_track_section_layout = QVBoxLayout(self.metadata_track_section)
         self.metadata_track_section_layout.setContentsMargins(10, 10, 10, 10)
         self.metadata_track_section_layout.setSpacing(10)
@@ -660,6 +981,9 @@ class MainWindow(QMainWindow):
         )
         self.metadata_track_form.setHorizontalSpacing(10)
         self.metadata_track_form.setVerticalSpacing(10)
+        self.metadata_track_form.setRowWrapPolicy(
+            QFormLayout.RowWrapPolicy.WrapLongRows
+        )
 
         self.metadata_track_title_label = QLabel("Трек")
         self.metadata_track_title_edit = QLineEdit()
@@ -695,7 +1019,7 @@ class MainWindow(QMainWindow):
         self.metadata_track_buttons.setContentsMargins(0, 6, 0, 0)
         self.metadata_track_buttons.setSpacing(10)
         self.metadata_track_buttons.addStretch(1)
-        self.metadata_track_cancel_button = self.create_square_icon_button("Отмена")
+        self.metadata_track_cancel_button = self.create_square_icon_button("Вернуть")
         self.metadata_track_cancel_button.clicked.connect(
             self.cancel_track_metadata_panel_changes
         )
@@ -724,6 +1048,7 @@ class MainWindow(QMainWindow):
         )
         metadata_form.setHorizontalSpacing(10)
         metadata_form.setVerticalSpacing(10)
+        metadata_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
 
         self.metadata_title_label = QLabel("Название")
         self.metadata_title_edit = QLineEdit()
@@ -790,7 +1115,7 @@ class MainWindow(QMainWindow):
         metadata_buttons.setContentsMargins(0, 6, 0, 0)
         metadata_buttons.setSpacing(10)
         metadata_buttons.addStretch(1)
-        self.metadata_cancel_button = self.create_square_icon_button("Отмена")
+        self.metadata_cancel_button = self.create_square_icon_button("Вернуть")
         self.metadata_cancel_button.clicked.connect(self.cancel_metadata_panel_changes)
         self.metadata_save_button = self.create_square_icon_button("Сохранить")
         self.metadata_save_button.clicked.connect(self.save_metadata_panel_changes)
@@ -799,9 +1124,98 @@ class MainWindow(QMainWindow):
         self.metadata_generic_section_layout.addLayout(metadata_buttons)
         metadata_layout.addStretch(1)
 
+        self.playback_panel = QFrame()
+        self.playback_panel.setObjectName("playback_panel")
+        self.playback_panel_layout = QVBoxLayout(self.playback_panel)
+        self.playback_panel_layout.setContentsMargins(12, 12, 12, 12)
+        self.playback_panel_layout.setSpacing(10)
+        self.playback_context_label = QLabel("")
+        self.playback_context_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.playback_context_label.setWordWrap(True)
+        self.playback_context_label.setVisible(False)
+        self.playback_panel_layout.addWidget(self.playback_context_label)
+        self.playback_cover_label = RotatingDiscWidget()
+        self.playback_panel_layout.addWidget(self.playback_cover_label)
+        self.playback_title_label = QLabel("Ничего не воспроизводится")
+        self.playback_title_label.setWordWrap(True)
+        self.playback_author_label = ClickableLabel("")
+        self.playback_author_label.setWordWrap(True)
+        self.playback_author_label.clicked.connect(self.open_playback_author)
+        self.playback_album_label = ClickableLabel("")
+        self.playback_album_label.setWordWrap(True)
+        self.playback_album_label.clicked.connect(self.open_playback_album)
+        self.playback_panel_layout.addWidget(self.playback_title_label)
+        self.playback_panel_layout.addWidget(self.playback_author_label)
+        self.playback_panel_layout.addWidget(self.playback_album_label)
+        self.playback_queue_title = QLabel("Очередь")
+        self.playback_panel_layout.addWidget(self.playback_queue_title)
+        self.playback_queue_scroll = QScrollArea()
+        self.playback_queue_scroll.setWidgetResizable(True)
+        self.playback_queue_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.playback_queue_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.playback_queue_container = QWidget()
+        self.playback_queue_container.setMinimumWidth(0)
+        self.playback_queue_container.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        self.playback_queue_layout = QVBoxLayout(self.playback_queue_container)
+        self.playback_queue_layout.setContentsMargins(0, 0, 0, 0)
+        self.playback_queue_layout.setSpacing(6)
+        self.playback_queue_scroll.setWidget(self.playback_queue_container)
+        self.playback_panel_layout.addWidget(self.playback_queue_scroll, 1)
+        self.playback_queue_cards: list[PlaybackQueueTrackCard] = []
+
+        self.history_panel = QFrame()
+        self.history_panel.setObjectName("history_panel")
+        history_panel_layout = QVBoxLayout(self.history_panel)
+        history_panel_layout.setContentsMargins(12, 12, 12, 12)
+        self.history_scroll = QScrollArea()
+        self.history_scroll.setWidgetResizable(True)
+        self.history_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.history_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.history_container = QWidget()
+        self.history_container.setMinimumWidth(0)
+        self.history_container.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        self.history_layout = QVBoxLayout(self.history_container)
+        self.history_layout.setContentsMargins(0, 0, 0, 0)
+        self.history_layout.setSpacing(6)
+        self.history_scroll.setWidget(self.history_container)
+        history_panel_layout.addWidget(self.history_scroll)
+        self.history_cards: list[PlaybackQueueTrackCard] = []
+
+        self.right_panel_stack = QStackedWidget()
+        self.right_panel_stack.setMinimumWidth(0)
+        self.right_panel_stack.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
+        )
+        self.metadata_scroll = QScrollArea()
+        self.metadata_scroll.setWidgetResizable(True)
+        self.metadata_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.metadata_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.metadata_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.metadata_scroll.setWidget(self.metadata_panel)
+        self.right_panel_stack.addWidget(self.metadata_scroll)
+        self.right_panel_stack.addWidget(self.playback_panel)
+        self.right_panel_stack.addWidget(self.history_panel)
+        self.right_panel_stack.setCurrentWidget(self.playback_panel)
+
         self.experimental_splitter.addWidget(self.playlists_panel)
         self.experimental_splitter.addWidget(self.tracks_panel)
-        self.experimental_splitter.addWidget(self.metadata_panel)
+        self.experimental_splitter.addWidget(self.right_panel_stack)
         self.experimental_splitter.setSizes([220, 620, 280])
         self.experimental_splitter.splitterMoved.connect(
             lambda *_: self.sync_footer_sections()
@@ -809,9 +1223,12 @@ class MainWindow(QMainWindow):
 
         experimental_page_layout.addWidget(self.experimental_splitter)
         experimental_page_layout.addWidget(self.experimental_footer_widget)
-        layout.addWidget(self.experimental_page)
+        layout.addWidget(self.experimental_page, 1)
 
         self.setCentralWidget(root)
+        app_instance = QApplication.instance()
+        if app_instance is not None:
+            app_instance.installEventFilter(self)
         self.playlist_list.viewport().installEventFilter(self)
         self.playlist_list.currentRowChanged.connect(self.on_playlist_selected)
         self.restore_persisted_playlists()
@@ -820,10 +1237,16 @@ class MainWindow(QMainWindow):
         self.update_metadata_panel()
         self.update_delete_files_checkbox_visibility()
         self.update_start_button_state()
-        self.set_library_view_mode("playlists")
+        self.set_library_view_mode("authors")
         self.show_home_page()
         self.reload_theme_icons()
         self.apply_theme()
+        self.refresh_playback_cards()
+        self.refresh_playback_panel()
+        self.restore_playback_session()
+        QTimer.singleShot(0, self.sync_footer_sections)
+        QTimer.singleShot(0, self.update_playback_disc_size)
+        QTimer.singleShot(0, retranslate_all)
         if self.startup_root_dir_warning:
             QTimer.singleShot(0, self.show_startup_root_dir_warning)
 
@@ -834,15 +1257,237 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self.ensure_ffmpeg_available)
 
     def changeEvent(self, event) -> None:
-        if event.type() == QEvent.Type.PaletteChange:
-            self.reload_theme_icons()
-            self.apply_theme()
+        if (
+            event.type() == QEvent.Type.PaletteChange
+            and self.ignore_next_theme_palette_change
+        ):
+            self.ignore_next_theme_palette_change = False
+            super().changeEvent(event)
+            return
+        if (
+            event.type() == QEvent.Type.PaletteChange
+            and not self.palette_change_in_progress
+            and not self.theme_switch_in_progress
+        ):
+            self.palette_change_in_progress = True
+            try:
+                self.reload_theme_icons()
+                self.apply_theme()
+            finally:
+                self.palette_change_in_progress = False
+        if sys.platform == "darwin" and event.type() in {
+            QEvent.Type.ActivationChange,
+            QEvent.Type.WindowStateChange,
+        }:
+            QTimer.singleShot(0, self.position_macos_traffic_lights)
         super().changeEvent(event)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if sys.platform == "darwin" and not self.native_titlebar_configured:
+            QTimer.singleShot(0, self.configure_macos_unified_titlebar)
+
+    def create_macos_traffic_light_widget(self) -> QWidget:
+        container = QWidget()
+        if sys.platform != "darwin":
+            container.setFixedSize(0, 40)
+            return container
+        container.setFixedSize(74, 40)
+        controls_layout = QHBoxLayout(container)
+        controls_layout.setContentsMargins(2, 0, 2, 0)
+        controls_layout.setSpacing(8)
+        controls_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        self.macos_close_button = QToolButton()
+        self.macos_minimize_button = QToolButton()
+        self.macos_zoom_button = QToolButton()
+        controls = (
+            (self.macos_close_button, "#ff5f57", "Закрыть"),
+            (self.macos_minimize_button, "#febc2e", "Свернуть"),
+            (self.macos_zoom_button, "#28c840", "На весь экран"),
+        )
+        for button, color, tooltip in controls:
+            button.setFixedSize(14, 14)
+            button.setToolTip(tooltip)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setStyleSheet(
+                "QToolButton {"
+                f"background:{color}; border:none; border-radius:7px; padding:0;"
+                "}"
+                "QToolButton:hover { border:1px solid rgba(0,0,0,0.28); }"
+                "QToolButton:pressed { border:2px solid rgba(0,0,0,0.32); }"
+            )
+            controls_layout.addWidget(button)
+        self.macos_close_button.clicked.connect(self.close)
+        self.macos_minimize_button.clicked.connect(self.showMinimized)
+        self.macos_zoom_button.clicked.connect(self.toggle_macos_window_zoom)
+        return container
+
+    def toggle_macos_window_zoom(self) -> None:
+        native_window = getattr(self, "macos_native_window", None)
+        if native_window is not None:
+            try:
+                native_window.toggleFullScreen_(None)
+                return
+            except Exception:
+                pass
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+
+    def configure_macos_unified_titlebar(self) -> None:
+        if sys.platform != "darwin" or self.native_titlebar_configured:
+            return
+        try:
+            import objc
+            from AppKit import (
+                NSWindowStyleMaskFullSizeContentView,
+                NSWindowTitleHidden,
+            )
+
+            native_view = objc.objc_object(
+                c_void_p=int(self.winId())
+            )
+            native_window = native_view.window()
+            if native_window is None:
+                return
+            native_window.setStyleMask_(
+                native_window.styleMask()
+                | NSWindowStyleMaskFullSizeContentView
+            )
+            native_window.setTitlebarAppearsTransparent_(True)
+            native_window.setTitleVisibility_(NSWindowTitleHidden)
+            native_window.setMovableByWindowBackground_(False)
+            self.configure_macos_vibrancy(native_view, native_window)
+            if native_window.respondsToSelector_(
+                "setTitlebarSeparatorStyle:"
+            ):
+                native_window.setTitlebarSeparatorStyle_(0)
+            self.native_titlebar_configured = True
+            self.macos_native_window = native_window
+            self.apply_macos_window_effect_settings()
+            QTimer.singleShot(0, self.position_macos_traffic_lights)
+        except Exception as exc:
+            self.logger.warning(
+                "Unable to configure unified macOS titlebar: %s", exc
+            )
+
+    def configure_macos_vibrancy(self, native_view, native_window) -> None:
+        if sys.platform != "darwin" or hasattr(
+            self, "macos_visual_effect_view"
+        ):
+            return
+        from AppKit import (
+            NSColor,
+            NSViewHeightSizable,
+            NSViewWidthSizable,
+            NSVisualEffectBlendingModeBehindWindow,
+            NSVisualEffectMaterialUnderWindowBackground,
+            NSVisualEffectStateActive,
+            NSVisualEffectView,
+        )
+
+        effect_view = NSVisualEffectView.alloc().initWithFrame_(
+            native_view.bounds()
+        )
+        effect_view.setAutoresizingMask_(
+            NSViewWidthSizable | NSViewHeightSizable
+        )
+        effect_view.setMaterial_(
+            NSVisualEffectMaterialUnderWindowBackground
+        )
+        effect_view.setBlendingMode_(
+            NSVisualEffectBlendingModeBehindWindow
+        )
+        effect_view.setState_(NSVisualEffectStateActive)
+        native_window.setContentView_(effect_view)
+        effect_view.addSubview_(native_view)
+        native_view.setFrame_(effect_view.bounds())
+        native_view.setAutoresizingMask_(
+            NSViewWidthSizable | NSViewHeightSizable
+        )
+        native_window.setOpaque_(False)
+        native_window.setBackgroundColor_(NSColor.clearColor())
+        self.macos_visual_effect_view = effect_view
+        self.macos_qt_content_view = native_view
+        self.apply_macos_window_effect_settings()
+
+    def apply_macos_window_effect_settings(self) -> None:
+        if (
+            sys.platform != "darwin"
+            or not hasattr(self, "macos_visual_effect_view")
+            or not hasattr(self, "macos_native_window")
+        ):
+            return
+        from AppKit import NSColor
+        from Quartz import CIFilter
+
+        self.macos_visual_effect_view.setHidden_(
+            not self.window_blur_enabled
+        )
+        self.macos_visual_effect_view.setWantsLayer_(True)
+        effect_layer = self.macos_visual_effect_view.layer()
+        if effect_layer is not None:
+            if self.window_blur_enabled and self.window_blur_radius > 0:
+                blur_filter = CIFilter.filterWithName_("CIGaussianBlur")
+                blur_filter.setDefaults()
+                blur_filter.setValue_forKey_(
+                    float(self.window_blur_radius), "inputRadius"
+                )
+                effect_layer.setBackgroundFilters_([blur_filter])
+                self.macos_blur_filter = blur_filter
+            else:
+                effect_layer.setBackgroundFilters_([])
+        uses_translucent_composition = (
+            self.window_transparency_enabled or self.window_blur_enabled
+        )
+        self.macos_native_window.setOpaque_(
+            not uses_translucent_composition
+        )
+        self.macos_native_window.setBackgroundColor_(
+            NSColor.clearColor()
+            if uses_translucent_composition
+            else NSColor.windowBackgroundColor()
+        )
+
+    def position_macos_traffic_lights(self) -> None:
+        if (
+            sys.platform != "darwin"
+            or not getattr(self, "native_titlebar_configured", False)
+            or not hasattr(self, "macos_native_window")
+        ):
+            return
+        try:
+            from AppKit import (
+                NSWindowCloseButton,
+                NSWindowMiniaturizeButton,
+                NSWindowZoomButton,
+            )
+
+            for button_type in (
+                NSWindowCloseButton,
+                NSWindowMiniaturizeButton,
+                NSWindowZoomButton,
+            ):
+                native_button = self.macos_native_window.standardWindowButton_(
+                    button_type
+                )
+                if native_button is not None:
+                    native_button.setAlphaValue_(0.0)
+                    native_button.setHidden_(True)
+                    native_button.setEnabled_(False)
+        except Exception as exc:
+            self.logger.warning("Unable to hide native macOS traffic lights: %s", exc)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self.sync_footer_sections()
+        QTimer.singleShot(0, self.sync_footer_sections)
+        QTimer.singleShot(0, self.update_playback_disc_size)
+        if sys.platform == "darwin":
+            QTimer.singleShot(0, self.position_macos_traffic_lights)
         self.position_track_search_icon()
+        self.position_tracks_context_label()
         self.reposition_toast()
         if getattr(self, "experimental_source_mode", "") == "home":
             self.render_home_page()
@@ -854,7 +1499,194 @@ class MainWindow(QMainWindow):
         }:
             self.render_track_search_results()
 
+    def keyPressEvent(self, event) -> None:
+        repeated_volume_change = (
+            event.isAutoRepeat()
+            and self.command_modifier_active(event)
+            and event.key() in {Qt.Key.Key_Up, Qt.Key.Key_Down}
+        )
+        if event.isAutoRepeat() and not repeated_volume_change:
+            if self.command_modifier_active(event) and event.key() in {
+                Qt.Key.Key_Left,
+                Qt.Key.Key_Right,
+            }:
+                event.accept()
+                return
+            super().keyPressEvent(event)
+            return
+        key = event.key()
+        if self.command_modifier_active(event):
+            if key == Qt.Key.Key_Up:
+                self.footer_volume_slider.setValue(
+                    min(100, self.footer_volume_slider.value() + 5)
+                )
+                event.accept()
+                return
+            if key == Qt.Key.Key_Down:
+                self.footer_volume_slider.setValue(
+                    max(0, self.footer_volume_slider.value() - 5)
+                )
+                event.accept()
+                return
+            if key == Qt.Key.Key_Right:
+                self.play_next_track()
+                event.accept()
+                return
+            if key == Qt.Key.Key_Left:
+                self.play_previous_track()
+                event.accept()
+                return
+        if key == Qt.Key.Key_Space and not isinstance(
+            QApplication.focusWidget(), QLineEdit
+        ):
+            self.toggle_footer_playback()
+            event.accept()
+            return
+        if key == Qt.Key.Key_MediaPlay:
+            if self.audio_player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+                self.toggle_footer_playback()
+            event.accept()
+            return
+        if key in {Qt.Key.Key_MediaPause, Qt.Key.Key_MediaStop}:
+            if self.audio_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+                self.pause_audio_playback()
+            event.accept()
+            return
+        if key == Qt.Key.Key_MediaTogglePlayPause:
+            self.toggle_footer_playback()
+            event.accept()
+            return
+        if key == Qt.Key.Key_MediaNext:
+            self.play_next_track()
+            event.accept()
+            return
+        if key == Qt.Key.Key_MediaPrevious:
+            self.play_previous_track()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def command_modifier_active(self, event) -> bool:
+        modifiers = event.modifiers()
+        command_modifiers = (
+            Qt.KeyboardModifier.ControlModifier
+            | Qt.KeyboardModifier.MetaModifier
+        )
+        return bool(modifiers & command_modifiers)
+
     def eventFilter(self, watched, event) -> bool:
+        if (
+            event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+            and self.should_start_window_drag(watched, event)
+        ):
+            window_handle = self.windowHandle()
+            if window_handle is not None and window_handle.startSystemMove():
+                event.accept()
+                return True
+        if isinstance(watched, QDialog):
+            if event.type() == QEvent.Type.Polish:
+                self.install_compact_dialog_chrome(watched)
+            elif event.type() in {
+                QEvent.Type.Show,
+                QEvent.Type.Resize,
+            }:
+                chrome = getattr(watched, "compact_title_bar", None)
+                if chrome is not None:
+                    background = getattr(watched, "compact_background", None)
+                    if background is not None:
+                        background.setGeometry(watched.rect())
+                        background.lower()
+                        background.show()
+                    chrome.setGeometry(1, 1, max(0, watched.width() - 2), 34)
+                    chrome.sync_title()
+                    chrome.raise_()
+                    chrome.show()
+                    self.apply_dialog_rounded_mask(watched)
+                    if (
+                        event.type() == QEvent.Type.Show
+                        and sys.platform == "darwin"
+                        and not hasattr(
+                            watched, "compact_visual_effect_view"
+                        )
+                    ):
+                        QTimer.singleShot(
+                            0,
+                            lambda dialog=watched: (
+                                self.configure_macos_dialog_vibrancy(
+                                    dialog
+                                )
+                            ),
+                        )
+            elif event.type() == QEvent.Type.WindowTitleChange:
+                chrome = getattr(watched, "compact_title_bar", None)
+                if chrome is not None:
+                    chrome.sync_title()
+        if sys.platform == "darwin" and event.type() in {
+            QEvent.Type.Show,
+            QEvent.Type.Hide,
+            QEvent.Type.Close,
+            QEvent.Type.WindowActivate,
+            QEvent.Type.WindowDeactivate,
+            QEvent.Type.ApplicationActivate,
+            QEvent.Type.ApplicationDeactivate,
+        }:
+            QTimer.singleShot(0, self.position_macos_traffic_lights)
+        if event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            if self.command_modifier_active(event):
+                if key == Qt.Key.Key_Up:
+                    self.footer_volume_slider.setValue(
+                        min(100, self.footer_volume_slider.value() + 5)
+                    )
+                    return True
+                if key == Qt.Key.Key_Down:
+                    self.footer_volume_slider.setValue(
+                        max(0, self.footer_volume_slider.value() - 5)
+                    )
+                    return True
+                if key == Qt.Key.Key_Right:
+                    if not event.isAutoRepeat():
+                        self.play_next_track()
+                    return True
+                if key == Qt.Key.Key_Left:
+                    if not event.isAutoRepeat():
+                        self.play_previous_track()
+                    return True
+            if event.isAutoRepeat():
+                if key in {
+                    Qt.Key.Key_Space,
+                    Qt.Key.Key_MediaPlay,
+                    Qt.Key.Key_MediaPause,
+                    Qt.Key.Key_MediaTogglePlayPause,
+                    Qt.Key.Key_MediaStop,
+                    Qt.Key.Key_MediaNext,
+                    Qt.Key.Key_MediaPrevious,
+                }:
+                    return True
+                return False
+            if key == Qt.Key.Key_Space:
+                if isinstance(QApplication.focusWidget(), QLineEdit):
+                    return False
+                self.toggle_footer_playback()
+                return True
+            if key == Qt.Key.Key_MediaPlay:
+                if self.audio_player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+                    self.toggle_footer_playback()
+                return True
+            if key in {Qt.Key.Key_MediaPause, Qt.Key.Key_MediaStop}:
+                if self.audio_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+                    self.pause_audio_playback()
+                return True
+            if key == Qt.Key.Key_MediaTogglePlayPause:
+                self.toggle_footer_playback()
+                return True
+            if key == Qt.Key.Key_MediaNext:
+                self.play_next_track()
+                return True
+            if key == Qt.Key.Key_MediaPrevious:
+                self.play_previous_track()
+                return True
         if (
             hasattr(self, "playlist_list")
             and watched is self.playlist_list.viewport()
@@ -878,10 +1710,209 @@ class MainWindow(QMainWindow):
                 return True
         return super().eventFilter(watched, event)
 
+    def should_start_window_drag(self, watched, event) -> bool:
+        if not isinstance(watched, QWidget) or watched.window() is not self:
+            return False
+        if isinstance(
+            watched,
+            (QPushButton, QToolButton, QLineEdit, QSlider, QCheckBox),
+        ):
+            return False
+        global_position = event.globalPosition().toPoint()
+        window_position = self.mapFromGlobal(global_position)
+        inside_window = self.rect().contains(window_position)
+        if not inside_window:
+            return False
+        header_panel = getattr(self, "playlists_controls_panel", None)
+        return bool(
+            header_panel is not None
+            and (
+                watched is header_panel
+                or header_panel.isAncestorOf(watched)
+            )
+        )
+
+    def install_compact_dialog_chrome(self, dialog: QDialog) -> None:
+        if getattr(dialog, "compact_title_bar", None) is not None:
+            return
+        dialog.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        dialog.setAutoFillBackground(False)
+        dialog.setPalette(self.build_theme_palette(self.theme_mode))
+        layout = dialog.layout()
+        if layout is not None:
+            margins = layout.contentsMargins()
+            layout.setContentsMargins(
+                margins.left(),
+                margins.top() + 34,
+                margins.right(),
+                margins.bottom(),
+            )
+        colors = self.theme_colors()
+        dialog_background = self.translucent_dialog_background(colors["app_bg"])
+        dialog.setStyleSheet(
+            dialog.styleSheet()
+            + "QDialog, QMessageBox, QInputDialog, QFileDialog {"
+            f"background:transparent; color:{colors['text_primary']};"
+            "border:none;"
+            "}"
+            "QDialog QLabel, QMessageBox QLabel, QInputDialog QLabel, QFileDialog QLabel {"
+            f"color:{colors['text_secondary']}; background:transparent; border:none;"
+            "}"
+            "QDialog QLineEdit, QDialog QSpinBox, QDialog QComboBox {"
+            f"background:{colors['list_bg']}; color:{colors['text_primary']};"
+            f"border:1px solid {colors['panel_border']}; border-radius:8px; padding:6px 8px;"
+            "}"
+            "QDialog QPushButton {"
+            f"background:{colors['button_bg']}; color:{colors['text_primary']};"
+            f"border:1px solid {colors['button_border']}; border-radius:8px; padding:6px 12px;"
+            "}"
+            f"QDialog QPushButton:hover {{ background:{colors['button_hover']}; }}"
+            "QDialog QListView, QDialog QTreeView {"
+            f"background:{colors['list_bg']}; color:{colors['text_primary']};"
+            f"border:1px solid {colors['panel_border']}; border-radius:8px;"
+            "}"
+        )
+        dialog.compact_background = QFrame(dialog)
+        dialog.compact_background.setObjectName("compact_dialog_background")
+        dialog.compact_background.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+        )
+        dialog.compact_background.setGeometry(dialog.rect())
+        dialog.compact_background.setStyleSheet(
+            "QFrame#compact_dialog_background {"
+            f"background:{dialog_background};"
+            f"border:1px solid {colors['panel_border']};"
+            "border-radius:12px;"
+            "}"
+        )
+        dialog.compact_background.lower()
+        dialog.compact_background.show()
+        dialog.compact_title_bar = DialogTitleBar(
+            dialog, self.is_dark_theme()
+        )
+        dialog.compact_title_bar.setStyleSheet(
+            dialog.compact_title_bar.styleSheet()
+            + "QWidget#compact_dialog_titlebar { background:transparent; }"
+        )
+        dialog.compact_title_bar.setGeometry(
+            1, 1, max(0, dialog.width() - 2), 34
+        )
+        dialog.resize(dialog.width(), dialog.height() + 34)
+        dialog.compact_background.setGeometry(dialog.rect())
+        dialog.compact_background.lower()
+        self.apply_dialog_rounded_mask(dialog)
+
+    def configure_macos_dialog_vibrancy(self, dialog: QDialog) -> None:
+        if (
+            sys.platform != "darwin"
+            or hasattr(dialog, "compact_visual_effect_view")
+        ):
+            return
+        try:
+            import objc
+            from AppKit import (
+                NSColor,
+                NSViewHeightSizable,
+                NSViewWidthSizable,
+                NSVisualEffectBlendingModeBehindWindow,
+                NSVisualEffectMaterialUnderWindowBackground,
+                NSVisualEffectStateActive,
+                NSVisualEffectView,
+            )
+            from Quartz import CIFilter
+
+            native_view = objc.objc_object(c_void_p=int(dialog.winId()))
+            native_window = native_view.window()
+            if native_window is None:
+                return
+            effect_view = NSVisualEffectView.alloc().initWithFrame_(
+                native_view.bounds()
+            )
+            effect_view.setAutoresizingMask_(
+                NSViewWidthSizable | NSViewHeightSizable
+            )
+            effect_view.setMaterial_(
+                NSVisualEffectMaterialUnderWindowBackground
+            )
+            effect_view.setBlendingMode_(
+                NSVisualEffectBlendingModeBehindWindow
+            )
+            effect_view.setState_(NSVisualEffectStateActive)
+            effect_view.setHidden_(not self.window_blur_enabled)
+            effect_view.setWantsLayer_(True)
+            effect_layer = effect_view.layer()
+            if effect_layer is not None:
+                effect_layer.setCornerRadius_(12.0)
+                effect_layer.setMasksToBounds_(True)
+            if (
+                effect_layer is not None
+                and self.window_blur_enabled
+                and self.window_blur_radius > 0
+            ):
+                blur_filter = CIFilter.filterWithName_("CIGaussianBlur")
+                blur_filter.setDefaults()
+                blur_filter.setValue_forKey_(
+                    float(self.window_blur_radius), "inputRadius"
+                )
+                effect_layer.setBackgroundFilters_([blur_filter])
+                dialog.compact_blur_filter = blur_filter
+            native_window.setContentView_(effect_view)
+            effect_view.addSubview_(native_view)
+            native_view.setFrame_(effect_view.bounds())
+            native_view.setAutoresizingMask_(
+                NSViewWidthSizable | NSViewHeightSizable
+            )
+            native_window.setOpaque_(False)
+            native_window.setBackgroundColor_(NSColor.clearColor())
+            native_window.setHasShadow_(True)
+            dialog.compact_native_window = native_window
+            dialog.compact_visual_effect_view = effect_view
+            dialog.compact_qt_content_view = native_view
+            self.apply_dialog_rounded_mask(dialog)
+            self.logger.debug(
+                "Dialog blur configured | title=%s enabled=%s radius=%s",
+                dialog.windowTitle(),
+                self.window_blur_enabled,
+                self.window_blur_radius,
+            )
+        except Exception as error:
+            self.logger.warning(
+                "Unable to configure dialog blur: %s", error
+            )
+
+    def translucent_dialog_background(self, color_value: str) -> str:
+        color = QColor(color_value)
+        opacity = (
+            max(
+                0.10,
+                min(
+                    1.0,
+                    1.0 - self.window_transparency_percent / 100.0,
+                ),
+            )
+            if self.window_transparency_enabled
+            else 1.0
+        )
+        return (
+            f"rgba({color.red()}, {color.green()}, {color.blue()}, "
+            f"{opacity:.2f})"
+        )
+
+    def apply_dialog_rounded_mask(self, dialog: QDialog) -> None:
+        if dialog.width() <= 0 or dialog.height() <= 0:
+            return
+        path = QPainterPath()
+        path.addRoundedRect(
+            QRectF(0.0, 0.0, float(dialog.width()), float(dialog.height())),
+            12.0,
+            12.0,
+        )
+        dialog.setMask(QRegion(path.toFillPolygon().toPolygon()))
+
     def is_dark_theme(self) -> bool:
-        if self.theme_mode in {"light", "dark"}:
-            return self.theme_mode == "dark"
-        return self._palette_is_dark(self.palette())
+        return theme_is_dark(self.theme_mode)
 
     def _palette_is_dark(self, palette: QPalette) -> bool:
         window_color = palette.color(QPalette.ColorRole.Window)
@@ -890,54 +1921,63 @@ class MainWindow(QMainWindow):
 
     def build_theme_palette(self, mode: str) -> QPalette:
         palette = QPalette()
-        if mode == "light":
-            palette.setColor(QPalette.ColorRole.Window, QColor("#eef2f6"))
-            palette.setColor(QPalette.ColorRole.WindowText, QColor("#1f2630"))
-            palette.setColor(QPalette.ColorRole.Base, QColor("#ffffff"))
-            palette.setColor(QPalette.ColorRole.AlternateBase, QColor("#f5f7fa"))
-            palette.setColor(QPalette.ColorRole.ToolTipBase, QColor("#ffffff"))
-            palette.setColor(QPalette.ColorRole.ToolTipText, QColor("#1f2630"))
-            palette.setColor(QPalette.ColorRole.Text, QColor("#1f2630"))
-            palette.setColor(QPalette.ColorRole.Button, QColor("#eef2f6"))
-            palette.setColor(QPalette.ColorRole.ButtonText, QColor("#1f2630"))
-            palette.setColor(QPalette.ColorRole.BrightText, QColor("#ffffff"))
-            palette.setColor(QPalette.ColorRole.Link, QColor("#4e88d9"))
-            palette.setColor(QPalette.ColorRole.Highlight, QColor("#4e88d9"))
-            palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
-            palette.setColor(QPalette.ColorRole.PlaceholderText, QColor("#788292"))
-            return palette
-
-        palette.setColor(QPalette.ColorRole.Window, QColor("#1c1f24"))
-        palette.setColor(QPalette.ColorRole.WindowText, QColor("#eef2f7"))
-        palette.setColor(QPalette.ColorRole.Base, QColor("#171717"))
-        palette.setColor(QPalette.ColorRole.AlternateBase, QColor("#202020"))
-        palette.setColor(QPalette.ColorRole.ToolTipBase, QColor("#2e3136"))
-        palette.setColor(QPalette.ColorRole.ToolTipText, QColor("#eef2f7"))
-        palette.setColor(QPalette.ColorRole.Text, QColor("#eef2f7"))
-        palette.setColor(QPalette.ColorRole.Button, QColor("#2e3136"))
-        palette.setColor(QPalette.ColorRole.ButtonText, QColor("#eef2f7"))
-        palette.setColor(QPalette.ColorRole.BrightText, QColor("#ff5c6a"))
-        palette.setColor(QPalette.ColorRole.Link, QColor("#5f9ee6"))
-        palette.setColor(QPalette.ColorRole.Highlight, QColor("#355680"))
-        palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#eef2f7"))
-        palette.setColor(QPalette.ColorRole.PlaceholderText, QColor("#8f98a6"))
+        colors = load_theme(mode)["colors"]["palette"]
+        roles = {
+            "window": QPalette.ColorRole.Window,
+            "window_text": QPalette.ColorRole.WindowText,
+            "base": QPalette.ColorRole.Base,
+            "alternate_base": QPalette.ColorRole.AlternateBase,
+            "tooltip_base": QPalette.ColorRole.ToolTipBase,
+            "tooltip_text": QPalette.ColorRole.ToolTipText,
+            "text": QPalette.ColorRole.Text,
+            "button": QPalette.ColorRole.Button,
+            "button_text": QPalette.ColorRole.ButtonText,
+            "bright_text": QPalette.ColorRole.BrightText,
+            "link": QPalette.ColorRole.Link,
+            "highlight": QPalette.ColorRole.Highlight,
+            "highlighted_text": QPalette.ColorRole.HighlightedText,
+            "placeholder_text": QPalette.ColorRole.PlaceholderText,
+        }
+        for key, role in roles.items():
+            if key in colors:
+                palette.setColor(role, QColor(colors[key]))
         return palette
 
     def apply_theme_mode(
         self, mode: str, *, persist: bool = True, update_ui: bool = True
     ) -> None:
         normalized_mode = mode.strip().lower()
-        if normalized_mode not in {"light", "dark"}:
+        try:
+            normalized_mode = set_active_theme(normalized_mode)["id"]
+        except RuntimeError:
             return
         self.theme_mode = normalized_mode
         app = QApplication.instance()
-        if app is not None:
-            app.setPalette(self.build_theme_palette(normalized_mode))
-        if persist:
-            save_theme_mode(normalized_mode)
-        if update_ui and hasattr(self, "experimental_page"):
-            self.reload_theme_icons()
-            self.apply_theme()
+        self.theme_switch_in_progress = True
+        try:
+            if app is not None:
+                self.ignore_next_theme_palette_change = True
+                app.setPalette(self.build_theme_palette(normalized_mode))
+            if persist:
+                save_theme_mode(normalized_mode)
+            if update_ui and hasattr(self, "experimental_page"):
+                self.reload_theme_icons()
+                self.apply_theme()
+        finally:
+            self.theme_switch_in_progress = False
+            if app is not None:
+                QTimer.singleShot(
+                    0,
+                    lambda: setattr(
+                        self, "ignore_next_theme_palette_change", False
+                    ),
+                )
+
+    def apply_interface_font(self) -> None:
+        font = QFont(self.system_interface_font)
+        if self.interface_font_family:
+            font.setFamily(self.interface_font_family)
+        QApplication.setFont(font)
 
     def themed_icon_path(self, base_name: str) -> str:
         suffix = "light" if self.is_dark_theme() else "dark"
@@ -970,50 +2010,40 @@ class MainWindow(QMainWindow):
             return source_icon
         return QIcon(source_icon.pixmap(QSize(size, size)))
 
+    def icon_with_opacity(
+        self, source_icon: QIcon, opacity: float, size: int = 18
+    ) -> QIcon:
+        if source_icon.isNull():
+            return source_icon
+        source_pixmap = source_icon.pixmap(QSize(size, size))
+        result = QPixmap(source_pixmap.size())
+        result.setDevicePixelRatio(source_pixmap.devicePixelRatio())
+        result.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(result)
+        painter.setOpacity(max(0.0, min(1.0, opacity)))
+        painter.drawPixmap(0, 0, source_pixmap)
+        painter.end()
+        return QIcon(result)
+
     def theme_colors(self) -> dict[str, str]:
-        if self.is_dark_theme():
-            return {
-                "app_bg": "#1c1f24",
-                "button_bg": "#2e3136",
-                "button_hover": "#373b43",
-                "button_border": "#3b3f46",
-                "button_disabled_bg": "#2a2d33",
-                "button_disabled_border": "#353941",
-                "button_disabled_text": "#8b93a0",
-                "panel_bg": "#202020",
-                "panel_border": "#303030",
-                "list_bg": "#171717",
-                "text_primary": "#eef2f7",
-                "text_secondary": "#b4bcc9",
-                "text_muted": "#8f98a6",
-                "checkbox_bg": "#2e3136",
-                "checkbox_border": "#4a515c",
-                "checkbox_checked": "#5f9ee6",
-                "progress_bg": "#2a2d33",
-                "progress_border": "#3a3f48",
-                "footer_text": "#b4bcc9",
-            }
-        return {
-            "app_bg": "#eef2f6",
-            "button_bg": "#eef2f6",
-            "button_hover": "#e4e9f0",
-            "button_border": "#cad2de",
-            "button_disabled_bg": "#f4f6f9",
-            "button_disabled_border": "#d8dee7",
-            "button_disabled_text": "#9aa4b2",
-            "panel_bg": "#f7f9fc",
-            "panel_border": "#d5dbe5",
-            "list_bg": "#f5f7fa",
-            "text_primary": "#1f2630",
-            "text_secondary": "#556170",
-            "text_muted": "#788292",
-            "checkbox_bg": "#ffffff",
-            "checkbox_border": "#b7c1ce",
-            "checkbox_checked": "#4e88d9",
-            "progress_bg": "#edf1f6",
-            "progress_border": "#d0d7e2",
-            "footer_text": "#556170",
-        }
+        colors = theme_colors("main", self.theme_mode)
+        opacity = 1.0 - self.element_transparency_percent / 100.0
+        if opacity < 1.0:
+            for key in (
+                "button_bg",
+                "button_hover",
+                "button_disabled_bg",
+                "panel_bg",
+                "list_bg",
+                "checkbox_bg",
+                "progress_bg",
+            ):
+                color = QColor(colors[key])
+                colors[key] = (
+                    f"rgba({color.red()}, {color.green()}, {color.blue()}, "
+                    f"{max(0.1, opacity):.2f})"
+                )
+        return colors
 
     def update_track_search_filter_button(self) -> None:
         title_map = {
@@ -1309,6 +2339,53 @@ class MainWindow(QMainWindow):
         self.delete_files_checkbox.setVisible(
             self.experimental_source_mode == "playlist"
         )
+        self.position_tracks_context_label()
+
+    def position_tracks_context_label(self) -> None:
+        if not hasattr(self, "tracks_context_label"):
+            return
+        self.tracks_context_label.setGeometry(self.tracks_toolbar_strip.rect())
+        self.tracks_context_label.lower()
+
+    def tracks_context_text(
+        self,
+        tracks: list[RemoteTrack] | list[LocalMusicTrack] | None = None,
+    ) -> str:
+        if self.experimental_source_mode == "home":
+            return "Общая зона"
+        if (
+            self.experimental_source_mode == "playlist"
+            and self.selected_playlist_index is not None
+            and 0 <= self.selected_playlist_index < len(self.playlists)
+        ):
+            return self.playlists[self.selected_playlist_index].name
+        album_name = (self.selected_album_name or "").strip()
+        if album_name and self.experimental_source_mode in {
+            "album",
+            "author_collection",
+            "search_album_tracks",
+        }:
+            author_name = (self.selected_author_name or "").strip()
+            if not author_name and tracks:
+                author_name = str(
+                    getattr(tracks[0], "artists", "") or ""
+                ).strip()
+            return (
+                f"{author_name} - {album_name}" if author_name else album_name
+            )
+        if self.selected_author_name and self.experimental_source_mode in {
+            "author_albums",
+            "author_collection",
+        }:
+            return self.selected_author_name
+        return ""
+
+    def update_tracks_context_label(
+        self,
+        tracks: list[RemoteTrack] | list[LocalMusicTrack] | None = None,
+    ) -> None:
+        self.tracks_context_label.setText(self.tracks_context_text(tracks))
+        self.position_tracks_context_label()
 
     def dialog_theme_colors(self) -> dict[str, str]:
         return dialog_theme_colors(self.is_dark_theme())
@@ -1377,9 +2454,18 @@ class MainWindow(QMainWindow):
     def create_square_icon_button(self, tooltip: str) -> QPushButton:
         button = QPushButton()
         button.setToolTip(tooltip)
-        button.setFixedSize(36, 36)
-        self.apply_icon_button_style(button)
+        button.setFixedSize(28, 28)
+        button.setIconSize(QSize(16, 16))
+        self.apply_metadata_action_button_style(button)
         return button
+
+    def apply_metadata_action_button_style(self, button: QPushButton) -> None:
+        button.setStyleSheet(
+            "QPushButton { background:transparent; border:none; padding:0; }"
+            "QPushButton:hover { background:transparent; border:none; }"
+            "QPushButton:pressed { background:transparent; border:none; }"
+            "QPushButton:disabled { background:transparent; border:none; }"
+        )
 
     def create_metadata_clear_button(self, tooltip: str) -> QPushButton:
         button = QPushButton()
@@ -1418,6 +2504,471 @@ class MainWindow(QMainWindow):
             lambda: self.set_library_view_mode("albums")
         )
         return menu
+
+    def build_footer_script_menu(self) -> QMenu:
+        menu = QMenu(self)
+        self.footer_metadata_action = menu.addAction("Метаданные")
+        self.footer_current_track_action = menu.addAction("Текущий трек")
+        self.footer_history_action = menu.addAction("История")
+        self.footer_metadata_action.triggered.connect(self.show_metadata_panel_mode)
+        self.footer_current_track_action.triggered.connect(
+            self.show_current_playback_track
+        )
+        self.footer_history_action.triggered.connect(self.show_playback_history)
+        return menu
+
+    def build_audio_output_menu(self) -> QMenu:
+        menu = QMenu(self)
+        menu.aboutToShow.connect(self.rebuild_audio_output_menu)
+        return menu
+
+    def position_footer_menu_above(
+        self, button: QPushButton, menu: QMenu
+    ) -> None:
+        menu.ensurePolished()
+        menu.adjustSize()
+        menu_size = menu.sizeHint().expandedTo(menu.size())
+        button_top_left = button.mapToGlobal(button.rect().topLeft())
+        button_top_right = button.mapToGlobal(button.rect().topRight())
+        window_top_left = self.mapToGlobal(self.rect().topLeft())
+        padding = 6
+        minimum_x = window_top_left.x() + padding
+        maximum_x = max(
+            minimum_x,
+            window_top_left.x() + self.width() - menu_size.width() - padding,
+        )
+        x_position = max(
+            minimum_x,
+            min(button_top_right.x() - menu_size.width(), maximum_x),
+        )
+        minimum_y = window_top_left.y() + padding
+        maximum_y = max(
+            minimum_y,
+            window_top_left.y() + self.height() - menu_size.height() - padding,
+        )
+        y_position = max(
+            minimum_y,
+            min(button_top_left.y() - menu_size.height() - padding, maximum_y),
+        )
+        menu.move(x_position, y_position)
+        if not menu.isVisible():
+            QTimer.singleShot(
+                0, lambda: self.position_footer_menu_above(button, menu)
+            )
+
+    def rebuild_audio_output_menu(self) -> None:
+        if not hasattr(self, "footer_audio_output_button"):
+            return
+        menu = self.footer_audio_output_button.menu()
+        if menu is None:
+            return
+        menu.clear()
+        outputs = QMediaDevices.audioOutputs()
+        default_device = QMediaDevices.defaultAudioOutput()
+        current_device = self.audio_output.device()
+        for device in outputs:
+            is_default = device.id() == default_device.id()
+            label = device.description() or "Аудиовыход"
+            if is_default:
+                label = f"{label} (по умолчанию)"
+            action = menu.addAction(
+                self.monitor_icon
+                if self.audio_output_uses_speakers(device)
+                else self.headphones_icon,
+                label,
+            )
+            action.setCheckable(True)
+            action.setChecked(device.id() == current_device.id())
+            action.triggered.connect(
+                lambda _checked=False, selected=device: self.select_audio_output(
+                    selected
+                )
+            )
+        if not outputs:
+            action = menu.addAction("Аудиовыходы не найдены")
+            action.setEnabled(False)
+        self.update_audio_output_indicator()
+
+    def select_audio_output(self, device) -> None:
+        self.audio_output.setDevice(device)
+        self.crossfade_audio_output.setDevice(device)
+        self.update_audio_output_indicator()
+
+    def update_audio_output_indicator(self) -> None:
+        if not hasattr(self, "footer_audio_output_button"):
+            return
+        current_device = self.audio_output.device()
+        self.footer_audio_output_button.setIcon(
+            self.monitor_icon
+            if self.audio_output_uses_speakers(current_device)
+            else self.headphones_icon
+        )
+        description = current_device.description() or "Аудиовыход"
+        self.footer_audio_output_button.setToolTip(description)
+
+    def audio_output_uses_speakers(self, device) -> bool:
+        description = (device.description() or "").casefold()
+        speaker_markers = (
+            "speaker",
+            "speakers",
+            "динамик",
+            "built-in output",
+            "macbook",
+            "display audio",
+            "monitor",
+        )
+        return any(marker in description for marker in speaker_markers)
+
+    def show_metadata_panel_mode(self) -> None:
+        self.right_panel_mode = "metadata"
+        self.right_panel_stack.setCurrentWidget(self.metadata_scroll)
+        self.footer_script_button.setIcon(self.script_icon)
+        self.update_metadata_panel()
+
+    def show_current_playback_track(self) -> None:
+        self.right_panel_mode = "playback"
+        self.right_panel_stack.setCurrentWidget(self.playback_panel)
+        self.footer_script_button.setIcon(self.queue_icon)
+        self.refresh_playback_panel()
+
+    def show_playback_history(self) -> None:
+        self.right_panel_mode = "history"
+        self.right_panel_stack.setCurrentWidget(self.history_panel)
+        self.footer_script_button.setIcon(self.history_icon)
+        self.refresh_playback_history()
+
+    def open_playback_author(self) -> None:
+        track = self.find_track_by_file_path(self.playback_track_path)
+        if track is None or not track.artists.strip():
+            return
+        self.on_home_author_selected(track.artists.strip())
+
+    def open_playback_album(self) -> None:
+        track = self.find_track_by_file_path(self.playback_track_path)
+        if track is None or not track.album.strip():
+            return
+        self.on_home_album_selected(track.album.strip(), track.artists.strip())
+
+    def handle_app_about_to_quit(self) -> None:
+        self.persist_playback_session()
+        self.cancel_crossfade()
+        self.system_now_playing.shutdown()
+
+    def on_system_media_command(self, command: str) -> None:
+        if command == "toggle":
+            self.toggle_footer_playback()
+            return
+        if command == "play":
+            if (
+                self.audio_player.playbackState()
+                != QMediaPlayer.PlaybackState.PlayingState
+            ):
+                self.toggle_footer_playback()
+            return
+        if command == "pause":
+            if (
+                self.audio_player.playbackState()
+                == QMediaPlayer.PlaybackState.PlayingState
+            ):
+                self.pause_audio_playback()
+            return
+        if command == "next":
+            self.play_next_track()
+            return
+        if command == "previous":
+            self.play_previous_track()
+
+    def persist_playback_session(self) -> None:
+        if not self.playback_track_path or not os.path.isfile(
+            self.playback_track_path
+        ):
+            save_playback_session({})
+            return
+        save_playback_session(
+            {
+                "track_path": self.playback_track_path,
+                "position_ms": max(0, self.audio_player.position()),
+                "queue": list(self.playback_queue),
+                "source_queue": list(self.playback_source_queue),
+                "queue_index": self.playback_queue_index,
+                "history": list(self.playback_history),
+                "playback_log": list(self.playback_log),
+                "context_title": self.playback_context_title,
+                "repeat_mode": self.repeat_mode,
+                "shuffle_enabled": self.shuffle_enabled,
+            }
+        )
+
+    def restore_playback_session(self) -> None:
+        session = load_playback_session()
+        track_path = os.path.realpath(
+            str(session.get("track_path") or "").strip()
+        )
+        if not track_path or not os.path.isfile(track_path):
+            return
+
+        raw_queue = session.get("queue")
+        queue = []
+        if isinstance(raw_queue, list):
+            queue = [
+                os.path.realpath(str(path))
+                for path in raw_queue
+                if str(path or "").strip() and os.path.isfile(str(path))
+            ]
+        if track_path not in queue:
+            queue.insert(0, track_path)
+        self.playback_queue = queue
+        self.playback_queue_index = queue.index(track_path)
+
+        raw_history = session.get("history")
+        if isinstance(raw_history, list):
+            self.playback_history = [
+                os.path.realpath(str(path))
+                for path in raw_history[-200:]
+                if str(path or "").strip() and os.path.isfile(str(path))
+            ]
+        else:
+            self.playback_history = []
+
+        raw_playback_log = session.get("playback_log")
+        if isinstance(raw_playback_log, list):
+            self.playback_log = [
+                os.path.realpath(str(path))
+                for path in raw_playback_log[-500:]
+                if str(path or "").strip() and os.path.isfile(str(path))
+            ]
+            while self.playback_log and self.playback_log[-1] == track_path:
+                self.playback_log.pop()
+        else:
+            self.playback_log = []
+
+        raw_source_queue = session.get("source_queue")
+        if isinstance(raw_source_queue, list):
+            self.playback_source_queue = [
+                os.path.realpath(str(path))
+                for path in raw_source_queue
+                if str(path or "").strip() and os.path.isfile(str(path))
+            ]
+        else:
+            self.playback_source_queue = list(queue)
+        if track_path not in self.playback_source_queue:
+            self.playback_source_queue.insert(0, track_path)
+
+        self.playback_track_path = track_path
+        self.playback_context_title = str(
+            session.get("context_title") or ""
+        ).strip()
+        try:
+            self.repeat_mode = max(0, min(2, int(session.get("repeat_mode", 0))))
+        except (TypeError, ValueError):
+            self.repeat_mode = 0
+        self.shuffle_enabled = bool(session.get("shuffle_enabled", False))
+        try:
+            self.pending_restore_position_ms = max(
+                0, int(session.get("position_ms", 0))
+            )
+        except (TypeError, ValueError):
+            self.pending_restore_position_ms = 0
+
+        self.audio_player.setSource(QUrl.fromLocalFile(track_path))
+        track = self.find_track_by_file_path(track_path)
+        self.system_now_playing.set_track(
+            title=(
+                track.title
+                if track
+                else os.path.splitext(os.path.basename(track_path))[0]
+            ),
+            artist=track.artists if track else "Неизвестный автор",
+            album=track.album if track else "",
+            artwork_data=track.thumbnail_data if track else None,
+            position_seconds=self.pending_restore_position_ms / 1000.0,
+            playing=False,
+        )
+        self.update_footer_playback_modes()
+        self.refresh_playback_cards()
+        self.refresh_playback_panel()
+
+    def find_track_by_file_path(
+        self, file_path: str
+    ) -> RemoteTrack | LocalMusicTrack | None:
+        normalized_path = os.path.realpath(file_path) if file_path else ""
+        if not normalized_path:
+            return None
+        candidates: list[RemoteTrack | LocalMusicTrack] = list(
+            self.local_music_tracks
+        )
+        for playlist in self.playlists:
+            candidates.extend(playlist.tracks)
+        for track in candidates:
+            if self.normalized_track_file_path(track) == normalized_path:
+                return track
+        return None
+
+    def current_playback_context(self, queue_length: int) -> str:
+        if queue_length <= 1:
+            return ""
+        if (
+            self.experimental_source_mode == "playlist"
+            and self.selected_playlist_index is not None
+            and 0 <= self.selected_playlist_index < len(self.playlists)
+        ):
+            return self.playlists[self.selected_playlist_index].name
+        if self.experimental_source_mode in {"album", "search_album_tracks"}:
+            return self.selected_album_name or self.current_collection_label
+        if self.experimental_source_mode == "author_collection":
+            return self.selected_album_name or "Последнее загруженное"
+        if self.experimental_source_mode in {"home", "all_music"}:
+            return "Последнее загруженное"
+        return self.current_collection_label if self.current_collection_label != "—" else ""
+
+    def refresh_playback_panel(self) -> None:
+        if not hasattr(self, "playback_panel"):
+            return
+        current_track = self.find_track_by_file_path(self.playback_track_path)
+        remaining_count = max(0, len(self.playback_queue) - max(0, self.playback_queue_index))
+        context_text = self.playback_context_title if remaining_count > 1 else ""
+        self.playback_context_label.setText(context_text)
+        self.playback_context_label.setVisible(bool(context_text))
+        if current_track is None:
+            self.playback_title_label.setText("Ничего не воспроизводится")
+            self.playback_author_label.clear()
+            self.playback_album_label.clear()
+            self.playback_album_label.setVisible(False)
+            self.playback_author_label.setCursor(Qt.CursorShape.ArrowCursor)
+            self.playback_album_label.setCursor(Qt.CursorShape.ArrowCursor)
+            self.playback_author_label.setToolTip("")
+            self.playback_album_label.setToolTip("")
+            if self.playback_panel_track_path:
+                self.playback_cover_label.set_cover_data(None)
+            self.playback_panel_track_path = ""
+        else:
+            self.playback_title_label.setText(current_track.title or "Без названия")
+            self.playback_author_label.setText(
+                current_track.artists or "Неизвестный автор"
+            )
+            author_available = bool(current_track.artists.strip())
+            album_available = bool(current_track.album.strip())
+            self.playback_author_label.setCursor(
+                Qt.CursorShape.PointingHandCursor
+                if author_available
+                else Qt.CursorShape.ArrowCursor
+            )
+            self.playback_album_label.setCursor(
+                Qt.CursorShape.PointingHandCursor
+                if album_available
+                else Qt.CursorShape.ArrowCursor
+            )
+            self.playback_author_label.setToolTip(
+                "Открыть страницу автора" if author_available else ""
+            )
+            self.playback_album_label.setToolTip(
+                "Открыть альбом" if album_available else ""
+            )
+            self.playback_album_label.setText(current_track.album or "")
+            self.playback_album_label.setVisible(bool(current_track.album))
+            if self.playback_panel_track_path != self.playback_track_path:
+                self.playback_cover_label.set_cover_data(
+                    current_track.thumbnail_data,
+                    self.pending_disc_transition_direction,
+                )
+                self.playback_panel_track_path = self.playback_track_path
+
+        self.clear_layout(self.playback_queue_layout)
+        self.playback_queue_cards = []
+        start_index = max(0, self.playback_queue_index + 1)
+        for queue_index in range(start_index, len(self.playback_queue)):
+            path = self.playback_queue[queue_index]
+            track = self.find_track_by_file_path(path)
+            card = PlaybackQueueTrackCard(
+                queue_index,
+                track.title if track else os.path.splitext(os.path.basename(path))[0],
+                track.artists if track else "Неизвестный автор",
+                track.thumbnail_data if track else None,
+                active=False,
+            )
+            card.apply_theme(self.is_dark_theme())
+            card.activated.connect(self.activate_playback_queue_track)
+            card.delete_requested.connect(self.remove_playback_queue_track)
+            self.playback_queue_cards.append(card)
+            self.playback_queue_layout.addWidget(card)
+        if not self.playback_queue_cards:
+            empty_label = QLabel("Очередь пуста")
+            empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty_label.setStyleSheet(
+                f"color:{self.theme_colors()['text_muted']}; padding:16px; background:transparent; border:none;"
+            )
+            self.playback_queue_layout.addWidget(empty_label)
+        self.playback_queue_layout.addStretch(1)
+        if self.playback_queue_cards:
+            active_card = self.playback_queue_cards[0]
+            QTimer.singleShot(
+                0,
+                lambda card=active_card: self.playback_queue_scroll.ensureWidgetVisible(
+                    card, 0, 8
+                ),
+            )
+
+    def refresh_playback_history(self) -> None:
+        if not hasattr(self, "history_layout"):
+            return
+        self.clear_layout(self.history_layout)
+        self.history_cards = []
+        for history_index, path in enumerate(reversed(self.playback_log)):
+            track = self.find_track_by_file_path(path)
+            card = PlaybackQueueTrackCard(
+                history_index,
+                track.title if track else os.path.splitext(os.path.basename(path))[0],
+                track.artists if track else "Неизвестный автор",
+                track.thumbnail_data if track else None,
+                deletable=False,
+                interactive=False,
+            )
+            card.apply_theme(self.is_dark_theme())
+            self.history_cards.append(card)
+            self.history_layout.addWidget(card)
+        if not self.history_cards:
+            empty_label = QLabel("История пуста")
+            empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty_label.setStyleSheet(
+                f"color:{self.theme_colors()['text_muted']}; padding:16px; background:transparent; border:none;"
+            )
+            self.history_layout.addWidget(empty_label)
+        self.history_layout.addStretch(1)
+
+    def activate_playback_queue_track(self, queue_index: int) -> None:
+        if not (0 <= queue_index < len(self.playback_queue)):
+            return
+        selected_path = self.playback_queue[queue_index]
+        self.audio_player.stop()
+        self.playback_queue = self.playback_queue[queue_index:]
+        self.playback_source_queue = list(self.playback_queue)
+        self.playback_queue_index = 0
+        self.start_playback_path(selected_path)
+
+    def remove_playback_queue_track(self, queue_index: int) -> None:
+        if not (0 <= queue_index < len(self.playback_queue)):
+            return
+        removing_current = queue_index == self.playback_queue_index
+        self.playback_queue.pop(queue_index)
+        if queue_index < self.playback_queue_index:
+            self.playback_queue_index -= 1
+        self.playback_source_queue = list(self.playback_queue)
+        if removing_current:
+            self.audio_player.stop()
+            if self.playback_queue:
+                self.playback_queue_index = min(
+                    self.playback_queue_index, len(self.playback_queue) - 1
+                )
+                self.start_playback_path(
+                    self.playback_queue[self.playback_queue_index]
+                )
+                return
+            self.playback_queue_index = -1
+            self.playback_track_path = ""
+            self.audio_player.setSource(QUrl())
+            self.system_now_playing.clear()
+        self.refresh_playback_cards()
+        self.refresh_playback_panel()
 
     def build_add_menu(self) -> QMenu:
         menu = QMenu(self)
@@ -1501,12 +3052,22 @@ class MainWindow(QMainWindow):
             "}"
             "QPushButton::menu-indicator { image:none; width:0px; }"
             f"QPushButton:hover {{ background:{colors['button_hover']}; }}"
-            "QPushButton:checked { background:#355680; border-color:#4b74a7; }"
+            f"QPushButton:checked {{ background:{'#565656' if self.is_dark_theme() else '#d9e8fb'}; border-color:{'#747474' if self.is_dark_theme() else '#6e99d8'}; }}"
             "QPushButton:disabled {"
             f"background:{colors['button_disabled_bg']};"
             f"border-color:{colors['button_disabled_border']};"
             f"color:{colors['button_disabled_text']};"
             "}"
+        )
+
+    def apply_transparent_add_button_style(self) -> None:
+        colors = self.theme_colors()
+        self.create_playlist_button.setStyleSheet(
+            "QPushButton { background:transparent; border:none; padding:3px; }"
+            f"QPushButton:hover {{ background:{colors['button_hover']}; border:none; border-radius:8px; }}"
+            "QPushButton:pressed { background:transparent; border:none; }"
+            "QPushButton:disabled { background:transparent; border:none; }"
+            "QPushButton::menu-indicator { image:none; width:0px; }"
         )
 
     def apply_downloads_button_style(self, pulse: bool = False) -> None:
@@ -1516,7 +3077,7 @@ class MainWindow(QMainWindow):
                 "background:#2f7d42;"
                 "border:1px solid #42a25a;"
                 "border-radius:8px;"
-                "padding:0 12px;"
+                "padding:0;"
                 "color:#eefbf1;"
                 "font-size:12px;"
                 "font-weight:700;"
@@ -1526,7 +3087,7 @@ class MainWindow(QMainWindow):
                 "QPushButton:disabled { background:#35623f; border-color:#35623f; color:#cfe4d5; }"
             )
             return
-        self.apply_header_button_style(self.downloads_button)
+        self.apply_icon_button_style(self.downloads_button)
 
     def set_downloads_button_pulse_state(self, active: bool) -> None:
         self.downloads_button_pulse_active = active
@@ -1712,6 +3273,26 @@ class MainWindow(QMainWindow):
             "}"
         )
 
+    def sidebar_scrollbar_style(self) -> str:
+        handle = (
+            "rgba(150, 157, 168, 0.42)"
+            if self.is_dark_theme()
+            else "rgba(105, 116, 132, 0.32)"
+        )
+        handle_hover = (
+            "rgba(170, 177, 188, 0.68)"
+            if self.is_dark_theme()
+            else "rgba(105, 116, 132, 0.55)"
+        )
+        return (
+            "QScrollBar:vertical { background:transparent; width:6px; margin:4px 0; border:none; }"
+            f"QScrollBar::handle:vertical {{ background:{handle}; border:none; border-radius:3px; min-height:30px; }}"
+            f"QScrollBar::handle:vertical:hover {{ background:{handle_hover}; }}"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; width:0; background:transparent; border:none; }"
+            "QScrollBar::up-arrow:vertical, QScrollBar::down-arrow:vertical { width:0; height:0; background:transparent; border:none; }"
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:transparent; border:none; }"
+        )
+
     def apply_section_panel_style(self, frame: QFrame) -> None:
         colors = self.theme_colors()
         frame.setStyleSheet(
@@ -1739,11 +3320,69 @@ class MainWindow(QMainWindow):
                 f"QPushButton:hover {{ color:{colors['text_secondary']}; }}"
             )
 
+    def apply_footer_playback_mode_styles(self) -> None:
+        if not hasattr(self, "footer_repeat_button"):
+            return
+        colors = self.theme_colors()
+        for button, active in (
+            (self.footer_shuffle_button, self.shuffle_enabled),
+            (self.footer_repeat_button, self.repeat_mode != 0),
+        ):
+            background = colors["button_hover"] if active else "transparent"
+            border = colors["button_border"] if active else "transparent"
+            hover_background = colors["button_hover"] if active else "transparent"
+            button.setStyleSheet(
+                "QToolButton {"
+                f"background:{background}; border:1px solid {border};"
+                "border-radius:7px; padding:2px;"
+                "}"
+                f"QToolButton:hover {{ background:{hover_background}; border-radius:7px; }}"
+            )
+        self.footer_shuffle_button.setIcon(
+            self.shuffle_icon
+            if self.shuffle_enabled
+            else self.icon_with_opacity(self.shuffle_icon, 0.42)
+        )
+        self.footer_repeat_button.setIcon(
+            self.loop_icon
+            if self.repeat_mode != 0
+            else self.icon_with_opacity(self.loop_icon, 0.42)
+        )
+        self.footer_repeat_badge.setStyleSheet(
+            f"background:{colors['text_primary']}; color:{colors['app_bg']};"
+            "border:none; border-radius:5px; font-size:8px; font-weight:800;"
+        )
+
     def apply_theme(self) -> None:
         colors = self.theme_colors()
+        if sys.platform == "darwin":
+            self.setStyleSheet("QMainWindow { background:transparent; border:none; }")
         if hasattr(self, "root_widget"):
+            app_background = colors["app_bg"]
+            if sys.platform == "darwin" and (
+                self.window_transparency_enabled
+                or self.window_blur_enabled
+            ):
+                alpha = (
+                    max(
+                        0.10,
+                        min(
+                            1.0,
+                            1.0
+                            - self.window_transparency_percent / 100.0,
+                        ),
+                    )
+                    if self.window_transparency_enabled
+                    else 0.94
+                )
+                theme_background = QColor(colors["app_bg"])
+                app_background = (
+                    f"rgba({theme_background.red()}, "
+                    f"{theme_background.green()}, "
+                    f"{theme_background.blue()}, {alpha:.2f})"
+                )
             self.root_widget.setStyleSheet(
-                f"QWidget#appRoot {{ background:{colors['app_bg']}; border:none; }}"
+                f"QWidget#appRoot {{ background:{app_background}; border:none; }}"
             )
         self.experimental_page.setStyleSheet("background:transparent; border:none;")
         self.experimental_footer_widget.setStyleSheet(
@@ -1751,12 +3390,102 @@ class MainWindow(QMainWindow):
         )
         self.playlists_panel.setStyleSheet("background:transparent; border:none;")
         self.tracks_panel.setStyleSheet("background:transparent; border:none;")
+        self.right_panel_stack.setStyleSheet("background:transparent; border:none;")
+        self.playback_panel.setStyleSheet(
+            f"QFrame#playback_panel {{ background:{colors['panel_bg']}; border:1px solid {colors['panel_border']}; border-radius:10px; }}"
+        )
+        self.history_panel.setStyleSheet(
+            f"QFrame#history_panel {{ background:{colors['panel_bg']}; border:1px solid {colors['panel_border']}; border-radius:10px; }}"
+        )
+        self.history_scroll.setStyleSheet(self.vertical_scrollbar_style())
+        self.history_container.setStyleSheet("background:transparent; border:none;")
+        self.playback_cover_label.setStyleSheet(
+            f"background:{colors['list_bg']}; color:{colors['text_muted']}; border:1px solid {colors['panel_border']}; border-radius:10px; font-size:13px;"
+        )
+        self.playback_cover_label.set_dark_theme(self.is_dark_theme())
+        self.playback_title_label.setStyleSheet(
+            f"color:{colors['text_primary']}; font-size:15px; font-weight:700; background:transparent; border:none;"
+        )
+        self.playback_context_label.setStyleSheet(
+            f"color:{colors['text_secondary']}; font-size:13px; font-weight:700; background:transparent; border:none; padding:2px 0;"
+        )
+        self.playback_author_label.setStyleSheet(
+            f"QLabel {{ color:{colors['text_secondary']}; font-size:13px; background:transparent; border:none; }}"
+            f"QLabel:hover {{ color:{colors['text_primary']}; text-decoration:underline; }}"
+        )
+        self.playback_album_label.setStyleSheet(
+            f"QLabel {{ color:{colors['text_muted']}; font-size:12px; background:transparent; border:none; }}"
+            f"QLabel:hover {{ color:{colors['text_primary']}; text-decoration:underline; }}"
+        )
+        self.playback_queue_title.setStyleSheet(
+            f"color:{colors['text_primary']}; font-size:13px; font-weight:700; background:transparent; border:none;"
+        )
+        self.playback_queue_scroll.setStyleSheet(self.vertical_scrollbar_style())
+        self.playback_queue_container.setStyleSheet(
+            "background:transparent; border:none;"
+        )
+        for card in self.playback_queue_cards:
+            card.apply_theme(self.is_dark_theme())
+        for card in self.history_cards:
+            card.apply_theme(self.is_dark_theme())
         for section in [
             self.footer_left_section,
             self.footer_center_section,
             self.footer_right_section,
         ]:
             section.setStyleSheet("background:transparent; border:none;")
+        footer_button_style = (
+            "QToolButton { background:transparent; border:none; padding:2px; }"
+            f"QToolButton:hover {{ background:{colors['button_hover']}; border-radius:7px; }}"
+            "QToolButton:pressed { background:rgba(127,135,148,0.22); border-radius:7px; }"
+            "QToolButton:disabled { background:transparent; border:none; opacity:0.35; }"
+        )
+        for button in (
+            self.footer_shuffle_button,
+            self.footer_previous_button,
+            self.footer_play_button,
+            self.footer_next_button,
+            self.footer_repeat_button,
+        ):
+            button.setStyleSheet(footer_button_style)
+        self.apply_footer_playback_mode_styles()
+        self.footer_playback_progress.setStyleSheet(
+            f"QProgressBar {{ background:{colors['progress_bg']}; border:1px solid {colors['progress_border']}; border-radius:2px; margin:2px 0; }}"
+            f"QProgressBar::chunk {{ background:{'#ffffff' if self.is_dark_theme() else colors['checkbox_checked']}; border:none; border-radius:2px; }}"
+        )
+        self.apply_icon_button_style(self.footer_audio_output_button)
+        self.apply_icon_button_style(self.footer_script_button)
+        self.apply_icon_button_style(self.footer_volume_button)
+        menu_indicator_style = (
+            "QPushButton::menu-indicator { image:none; width:0px; height:0px; }"
+        )
+        self.footer_audio_output_button.setStyleSheet(
+            self.footer_audio_output_button.styleSheet() + menu_indicator_style
+        )
+        self.footer_script_button.setStyleSheet(
+            self.footer_script_button.styleSheet() + menu_indicator_style
+        )
+        self.footer_volume_slider.setStyleSheet(
+            f"QSlider::groove:horizontal {{ background:{colors['progress_bg']}; height:4px; border:1px solid {colors['progress_border']}; border-radius:2px; }}"
+            f"QSlider::sub-page:horizontal {{ background:{colors['text_secondary']}; border:none; border-radius:2px; }}"
+            f"QSlider::add-page:horizontal {{ background:{colors['progress_bg']}; border:none; border-radius:2px; }}"
+            f"QSlider::handle:horizontal {{ background:{colors['text_primary']}; width:10px; height:10px; margin:-3px 0; border:1px solid {colors['panel_border']}; border-radius:5px; }}"
+        )
+        if self.footer_script_button.menu() is not None:
+            footer_menu_style = (
+                "QMenu {"
+                f"background:{colors['panel_bg']}; border:1px solid {colors['panel_border']};"
+                f"color:{colors['text_primary']}; border-radius:10px; font-size:14px; padding:8px;"
+                "}"
+                "QMenu::item { padding:8px 14px 8px 30px; border-radius:8px; margin:2px 0; }"
+                f"QMenu::item:selected {{ background:{colors['button_hover']}; }}"
+                "QMenu::icon { padding-left:2px; }"
+            )
+            self.footer_script_button.menu().setStyleSheet(footer_menu_style)
+            if self.footer_audio_output_button.menu() is not None:
+                self.footer_audio_output_button.menu().setStyleSheet(
+                    footer_menu_style
+                )
         self.scroll_area.setStyleSheet(
             "QScrollArea { background:transparent; border:none; }"
         )
@@ -1798,7 +3527,7 @@ class MainWindow(QMainWindow):
         ]:
             self.apply_icon_button_style(button)
         self.apply_toolbar_icon_button_style(self.start_button)
-        self.apply_header_button_style(self.create_playlist_button)
+        self.apply_transparent_add_button_style()
         self.apply_header_button_style(self.track_search_filter_button)
         self.apply_icon_button_style(self.settings_button)
         self.apply_downloads_button_style(self.downloads_button_pulse_active)
@@ -1896,12 +3625,6 @@ class MainWindow(QMainWindow):
             f"background:transparent; border:none; color:{colors['text_muted']};"
         )
         for button in [
-            self.metadata_cancel_button,
-            self.metadata_save_button,
-            self.metadata_album_cancel_button,
-            self.metadata_album_save_button,
-            self.metadata_track_cancel_button,
-            self.metadata_track_save_button,
             self.metadata_album_title_clear_button,
             self.metadata_album_author_clear_button,
             self.metadata_author_clear_button,
@@ -1909,6 +3632,15 @@ class MainWindow(QMainWindow):
             self.metadata_album_clear_button,
         ]:
             self.apply_icon_button_style(button)
+        for button in [
+            self.metadata_cancel_button,
+            self.metadata_save_button,
+            self.metadata_album_cancel_button,
+            self.metadata_album_save_button,
+            self.metadata_track_cancel_button,
+            self.metadata_track_save_button,
+        ]:
+            self.apply_metadata_action_button_style(button)
         for button in [
             self.metadata_track_location_button,
         ]:
@@ -1933,10 +3665,11 @@ class MainWindow(QMainWindow):
         )
         self.playlist_list.setStyleSheet(
             "QListWidget {"
-            f"background:{colors['list_bg']};"
+            "background:transparent;"
             "border:none; padding:6px; }"
             "QListWidget::item { padding:0; margin:0 0 10px 0; border:none; }"
             "QListWidget::item:selected { background:transparent; }"
+            + self.sidebar_scrollbar_style()
         )
         if self.playlist_tracks_empty is not None:
             try:
@@ -1949,18 +3682,41 @@ class MainWindow(QMainWindow):
         self.author_context_label.setStyleSheet(
             f"font-size:12px; color:{colors['text_secondary']}; font-weight:700; background:transparent; border:none; padding:0 4px 2px 4px;"
         )
-        for frame in [
-            self.playlists_controls_panel,
-            self.playlist_list_panel,
-            self.metadata_panel,
-        ]:
-            self.apply_section_panel_style(frame)
+        self.metadata_panel.setStyleSheet(
+            "QFrame#metadata_panel { background:transparent; border:none; }"
+        )
+        self.metadata_scroll.setStyleSheet(
+            "QScrollArea { background:transparent; border:none; }"
+            "QScrollArea > QWidget > QWidget { background:transparent; border:none; }"
+        )
+        self.playlists_unified_panel.setStyleSheet(
+            "QFrame#playlists_unified_panel {"
+            f"background:{colors['panel_bg']};"
+            f"border:1px solid {colors['panel_border']};"
+            "border-radius:10px;"
+            "}"
+            "QFrame#playlists_controls_inner, QFrame#playlist_list_inner {"
+            "background:transparent; border:none; border-radius:0;"
+            "}"
+            "QFrame#playlists_section_separator {"
+            f"background:{colors['panel_border']}; border:none;"
+            "}"
+        )
+        self.playlists_controls_panel.setStyleSheet(
+            "QFrame#playlists_controls_inner { background:transparent; border:none; border-radius:0; }"
+        )
+        self.playlist_list_panel.setStyleSheet(
+            "QFrame#playlist_list_inner { background:transparent; border:none; border-radius:0; }"
+        )
         for frame in [self.tracks_search_panel, self.tracks_list_panel]:
             frame.setStyleSheet(
                 f"QFrame {{ background:{colors['panel_bg']}; border:1px solid {colors['panel_border']}; border-radius:10px; }}"
             )
         self.tracks_toolbar_strip.setStyleSheet(
-            f"background:{colors['app_bg']}; border:none;"
+            "background:transparent; border:none;"
+        )
+        self.tracks_context_label.setStyleSheet(
+            f"color:{colors['text_secondary']}; font-size:13px; font-weight:700; background:transparent; border:none;"
         )
         for frame in [self.metadata_album_section, self.metadata_track_section]:
             frame.setStyleSheet(
@@ -2030,16 +3786,14 @@ class MainWindow(QMainWindow):
         for card in self.cards:
             card.apply_theme(self.is_dark_theme())
         self.add_card.apply_theme(self.is_dark_theme())
-        if self.has_active_track_search() and self.track_search_scope in {
-            "albums",
-            "authors",
-            "playlists",
-        }:
-            self.render_track_search_results()
-        elif self.experimental_source_mode == "home":
-            self.render_home_page()
-        elif self.experimental_source_mode == "author_albums":
-            self.render_author_album_cards(self.selected_author_name or "")
+        for card_type in (
+            HomeAuthorCard,
+            SearchAlbumCard,
+            SearchAuthorCard,
+            SearchPlaylistCard,
+        ):
+            for card in self.playlist_tracks_container.findChildren(card_type):
+                card.apply_theme(self.is_dark_theme())
         self.refresh_open_downloads_popup()
         self.position_track_search_icon()
         self.refresh_metadata_panel_cover_preview()
@@ -2238,6 +3992,9 @@ class MainWindow(QMainWindow):
             self.remote_track_cards[visible_index].update_from_track(
                 track,
                 self.get_track_display_number(track, visible_index),
+            )
+            self.configure_track_playback_card(
+                self.remote_track_cards[visible_index], track
             )
 
     def convert_downloaded_youtube_playlist_to_manual(
@@ -2481,8 +4238,6 @@ class MainWindow(QMainWindow):
             )
             return
         self.library_view_mode = mode
-        self.selected_author_name = None
-        self.selected_album_name = None
         title_map = {
             "playlists": "Плейлисты",
             "authors": "Авторы",
@@ -2493,33 +4248,9 @@ class MainWindow(QMainWindow):
         self.update_library_view_icon()
         self.refresh_local_music_tracks()
         self.rebuild_playlist_list()
-        if mode == "playlists":
-            self.experimental_source_mode = "none"
-            self.selected_playlist_index = None
-            self.current_collection_label = "Плейлисты"
-            self.clear_experimental_track_selection()
-            self.playlist_list.blockSignals(True)
-            self.playlist_list.setCurrentRow(-1)
-            self.playlist_list.blockSignals(False)
-            self.restore_sidebar_selection()
-            self.render_experimental_tracks([])
-            self.update_metadata_panel()
-            self.update_delete_files_checkbox_visibility()
-            self.update_start_button_state()
-            return
         self.playlist_list.blockSignals(True)
         self.playlist_list.setCurrentRow(-1)
         self.playlist_list.blockSignals(False)
-        self.restore_sidebar_selection()
-        self.experimental_source_mode = (
-            "author_browser" if mode == "authors" else "album_browser"
-        )
-        self.current_collection_label = title_map[mode]
-        self.clear_experimental_track_selection()
-        self.render_experimental_tracks([])
-        self.update_metadata_panel()
-        self.update_delete_files_checkbox_visibility()
-        self.update_start_button_state()
 
     def on_library_back_requested(self) -> None:
         if (
@@ -2597,20 +4328,46 @@ class MainWindow(QMainWindow):
     def relayout_status_widgets(self) -> None:
         self.clear_layout(self.experimental_footer_layout)
         self.experimental_footer_layout.addWidget(
-            self.settings_button,
+            self.footer_left_section,
             0,
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
         )
         self.experimental_footer_layout.addWidget(
-            self.downloads_button,
+            self.footer_center_section,
             0,
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
         )
-        self.experimental_footer_layout.addStretch(1)
+        self.experimental_footer_layout.addWidget(
+            self.footer_right_section,
+            0,
+        )
         self.experimental_footer_widget.setVisible(True)
 
     def sync_footer_sections(self) -> None:
-        return
+        if not hasattr(self, "experimental_splitter"):
+            return
+        section_sizes = self.experimental_splitter.sizes()
+        if len(section_sizes) != 3 or not all(section_sizes):
+            return
+        self.experimental_footer_layout.setSpacing(
+            self.experimental_splitter.handleWidth()
+        )
+        for section, width in zip(
+            (
+                self.footer_left_section,
+                self.footer_center_section,
+                self.footer_right_section,
+            ),
+            section_sizes,
+        ):
+            section.setFixedWidth(width)
+        self.experimental_footer_layout.invalidate()
+        self.experimental_footer_layout.activate()
+        self.update_playback_disc_size()
+
+    def update_playback_disc_size(self) -> None:
+        if not hasattr(self, "playback_cover_label"):
+            return
+        available_width = max(80, self.right_panel_stack.width() - 24)
+        self.playback_cover_label.setFixedHeight(available_width)
 
     def clear_layout(self, layout: QHBoxLayout | QVBoxLayout) -> None:
         while layout.count():
@@ -2632,12 +4389,26 @@ class MainWindow(QMainWindow):
             version_text=self.PROJECT_VERSION,
             active_folder_path=self.elenveil_root_dir,
             theme_mode=self.theme_mode,
+            interface_font_family=self.interface_font_family,
+            language_code=self.language_code,
             open_folder_icon=self.reveal_icon,
             choose_folder_icon=self.choose_folder_icon,
+            update_icon=self.update_icon,
             youtube_cookies_browser=self.youtube_cookies_browser,
             youtube_cookies_file=self.youtube_cookies_file,
+            crossfade_enabled=self.crossfade_enabled,
+            crossfade_seconds=self.crossfade_seconds,
+            volume_normalization_enabled=self.volume_normalization_enabled,
+            window_transparency=self.window_transparency_enabled,
+            window_blur=self.window_blur_enabled,
+            window_transparency_percent=self.window_transparency_percent,
+            window_blur_radius=self.window_blur_radius,
+            element_transparency_percent=self.element_transparency_percent,
         )
         dialog.github_button.clicked.connect(self.open_project_github)
+        dialog.update_button.clicked.connect(
+            lambda: self.check_for_application_update(dialog)
+        )
         dialog.open_folder_button.clicked.connect(self.open_elenveil_music_folder)
 
         def choose_folder() -> None:
@@ -2650,18 +4421,179 @@ class MainWindow(QMainWindow):
             selected_mode = dialog.selected_theme_mode()
             if selected_mode == self.theme_mode:
                 return
+            dialog.setUpdatesEnabled(False)
             self.apply_theme_mode(selected_mode)
             dialog.set_theme_mode(selected_mode)
             dialog.set_icons(self.reveal_icon, self.choose_folder_icon)
+            dialog.update_button.setIcon(self.update_icon)
             dialog.apply_theme()
+
+            def finish_dialog_theme_update() -> None:
+                if not dialog.isVisible():
+                    dialog.setUpdatesEnabled(True)
+                    return
+                dialog.apply_theme()
+                dialog.style().unpolish(dialog)
+                dialog.style().polish(dialog)
+                dialog.setUpdatesEnabled(True)
+                dialog.update()
+
+            QTimer.singleShot(0, finish_dialog_theme_update)
 
         dialog.choose_folder_button.clicked.connect(choose_folder)
         dialog.theme_combo.currentIndexChanged.connect(lambda _index: update_theme())
         dialog.exec()
+        self.interface_font_family = dialog.selected_interface_font_family()
+        save_interface_font_family(self.interface_font_family)
+        self.apply_interface_font()
+        self.language_code = set_language(dialog.selected_language_code())
+        save_language_code(self.language_code)
+        retranslate_all()
         cookies_browser, cookies_file = dialog.youtube_auth_values()
         self.youtube_cookies_browser = cookies_browser
         self.youtube_cookies_file = cookies_file
         save_youtube_auth_settings(cookies_browser, cookies_file)
+        (
+            self.crossfade_enabled,
+            self.crossfade_seconds,
+            self.volume_normalization_enabled,
+        ) = dialog.audio_values()
+        save_audio_settings(
+            self.crossfade_enabled,
+            self.crossfade_seconds,
+            self.volume_normalization_enabled,
+        )
+        self.apply_audio_output_volumes()
+        if not self.crossfade_enabled:
+            self.cancel_crossfade()
+        (
+            self.window_transparency_enabled,
+            self.window_blur_enabled,
+            self.window_transparency_percent,
+            self.window_blur_radius,
+            self.element_transparency_percent,
+        ) = dialog.window_effect_values()
+        save_window_effect_settings(
+            self.window_transparency_enabled,
+            self.window_blur_enabled,
+            self.window_transparency_percent,
+            self.window_blur_radius,
+            self.element_transparency_percent,
+        )
+        set_element_background_transparency(self.element_transparency_percent)
+        self.apply_macos_window_effect_settings()
+        self.apply_theme()
+
+    def check_for_application_update(self, dialog: SettingsDialog) -> None:
+        if getattr(self, "release_check_worker", None) is not None:
+            if self.release_check_worker.isRunning():
+                return
+        dialog.update_button.setEnabled(False)
+        dialog.update_button.setText("Проверка...")
+        worker = ReleaseCheckWorker(self.PROJECT_VERSION)
+        self.release_check_worker = worker
+
+        def restore_button() -> None:
+            if dialog is not None:
+                try:
+                    dialog.update_button.setEnabled(True)
+                    dialog.update_button.setText("Обновить")
+                except RuntimeError:
+                    pass
+
+        def no_update(tag: str) -> None:
+            restore_button()
+            message = (
+                f"У вас установлена последняя версия ({self.PROJECT_VERSION})."
+                if tag
+                else "В репозитории пока нет опубликованных релизов."
+            )
+            QMessageBox.information(dialog, "Обновление", message)
+
+        def failed(error: str) -> None:
+            restore_button()
+            QMessageBox.warning(
+                dialog,
+                "Ошибка обновления",
+                f"Не удалось проверить обновления.\n\n{error}",
+            )
+
+        worker.no_update.connect(no_update)
+        worker.failed.connect(failed)
+        worker.update_available.connect(
+            lambda release: self.confirm_application_update(dialog, release)
+        )
+        worker.finished.connect(worker.deleteLater)
+        worker.finished.connect(
+            lambda: setattr(self, "release_check_worker", None)
+        )
+        worker.start()
+
+    def confirm_application_update(self, dialog: SettingsDialog, release: dict) -> None:
+        tag = str(release.get("tag_name") or "")
+        asset = release["selected_asset"]
+        answer = QMessageBox.question(
+            dialog,
+            "Доступно обновление",
+            f"Доступна версия {tag}. Скачать и установить файл "
+            f"{asset.get('name', '')}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            dialog.update_button.setEnabled(True)
+            dialog.update_button.setText("Обновить")
+            return
+        dialog.update_button.setText("Загрузка: 0%")
+        worker = ReleaseDownloadWorker(release)
+        self.release_download_worker = worker
+        worker.progress_changed.connect(
+            lambda value: dialog.update_button.setText(f"Загрузка: {value}%")
+        )
+        worker.failed.connect(
+            lambda error: self.application_update_download_failed(dialog, error)
+        )
+        worker.downloaded.connect(
+            lambda path, downloaded_release: self.application_update_downloaded(
+                dialog, path, downloaded_release
+            )
+        )
+        worker.finished.connect(worker.deleteLater)
+        worker.finished.connect(
+            lambda: setattr(self, "release_download_worker", None)
+        )
+        worker.start()
+
+    def application_update_download_failed(
+        self, dialog: SettingsDialog, error: str
+    ) -> None:
+        dialog.update_button.setEnabled(True)
+        dialog.update_button.setText("Обновить")
+        QMessageBox.warning(
+            dialog,
+            "Ошибка обновления",
+            f"Не удалось скачать обновление.\n\n{error}",
+        )
+
+    def application_update_downloaded(
+        self, dialog: SettingsDialog, package_path: str, release: dict
+    ) -> None:
+        dialog.update_button.setEnabled(True)
+        dialog.update_button.setText("Обновить")
+        will_restart, message = launch_downloaded_update(package_path)
+        if will_restart:
+            QMessageBox.information(
+                dialog,
+                "Обновление загружено",
+                "Приложение закроется и автоматически запустит новую версию.",
+            )
+            QApplication.quit()
+            return
+        QMessageBox.information(
+            dialog,
+            "Обновление загружено",
+            message,
+        )
 
     def current_ytdlp_auth_options(self) -> dict:
         options = build_ytdlp_auth_options(
@@ -2970,7 +4902,7 @@ class MainWindow(QMainWindow):
             self.retry_remote_playlist_track(playlist_index, track_index)
 
     def default_elenveil_root_dir(self) -> str:
-        return os.path.join(os.path.expanduser("~"), "Music", "Elenveil")
+        return os.path.join(os.path.expanduser("~"), "Music", "Compact")
 
     def initialize_elenveil_root_dir(
         self, preferred_root_dir: str, fallback_root_dir: str
@@ -3000,7 +4932,7 @@ class MainWindow(QMainWindow):
             return
         QMessageBox.warning(
             self,
-            "Папка Elenveil",
+            "Папка библиотеки",
             self.startup_root_dir_warning,
         )
         self.startup_root_dir_warning = ""
@@ -3029,13 +4961,13 @@ class MainWindow(QMainWindow):
         ):
             QMessageBox.information(
                 self,
-                "Папка Elenveil",
+                "Папка библиотеки",
                 "Смена папки недоступна, пока выполняются фоновые задачи.",
             )
             return
         selected_dir = QFileDialog.getExistingDirectory(
             self,
-            "Выберите папку Elenveil",
+            "Выберите папку библиотеки",
             self.elenveil_root_dir or os.path.expanduser("~"),
         )
         if not selected_dir:
@@ -3046,7 +4978,7 @@ class MainWindow(QMainWindow):
         except OSError as error:
             QMessageBox.warning(
                 self,
-                "Папка Elenveil",
+                "Папка библиотеки",
                 f"Не удалось использовать выбранную папку:\n{error}",
             )
             return
@@ -3208,6 +5140,12 @@ class MainWindow(QMainWindow):
         if payload.get("kind") == "playlist":
             widget.context_requested.connect(
                 lambda global_pos, row=row: self.on_playlist_context_requested(
+                    row, global_pos
+                )
+            )
+        elif payload.get("kind") == "album":
+            widget.context_requested.connect(
+                lambda global_pos, row=row: self.on_sidebar_album_context_requested(
                     row, global_pos
                 )
             )
@@ -3781,6 +5719,7 @@ class MainWindow(QMainWindow):
             return
         playlist = self.playlists[playlist_index]
         menu = QMenu(self)
+        play_next_action = menu.addAction("Играть следующим")
         rename_action = menu.addAction("Переименовать")
         convert_action = None
         if playlist.source == "manual" and playlist.tracks:
@@ -3790,6 +5729,9 @@ class MainWindow(QMainWindow):
         delete_action = menu.addAction("Удалить")
 
         selected_action = menu.exec(global_pos)
+        if selected_action == play_next_action:
+            self.add_playlist_to_play_next(playlist_index)
+            return
         if selected_action == rename_action:
             self.rename_playlist(playlist_index)
             return
@@ -3805,6 +5747,28 @@ class MainWindow(QMainWindow):
             return
         if selected_action == delete_action:
             self.on_playlist_delete_requested(row)
+
+    def on_sidebar_album_context_requested(self, row: int, global_pos) -> None:
+        if not (0 <= row < len(self.sidebar_items)):
+            return
+        payload = self.sidebar_items[row]
+        if payload.get("kind") != "album":
+            return
+        album_name = str(payload.get("album") or "").strip()
+        if not album_name:
+            return
+        self.playlist_list.setCurrentRow(row)
+        menu = QMenu(self)
+        play_next_action = menu.addAction("Играть следующим")
+        if menu.exec(global_pos) == play_next_action:
+            tracks = [
+                track
+                for track in self.local_music_tracks
+                if track.album.strip() == album_name
+            ]
+            self.insert_tracks_after_current(
+                self.order_collection_tracks_for_playback(tracks)
+            )
 
     def add_playlist(self) -> None:
         dialog = QDialog(self)
@@ -3872,7 +5836,7 @@ class MainWindow(QMainWindow):
             self.add_youtube_playlist()
             return
 
-    def add_manual_playlist(self) -> None:
+    def add_manual_playlist(self) -> int | None:
         dialog = QInputDialog(self)
         dialog.setWindowTitle("Ручной плейлист")
         dialog.setLabelText("Введите название плейлиста:")
@@ -3882,7 +5846,7 @@ class MainWindow(QMainWindow):
         ok = dialog.exec()
         playlist_name = dialog.textValue().strip()
         if not ok or not playlist_name:
-            return
+            return None
 
         existing_index = next(
             (
@@ -3899,16 +5863,16 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self, "Плейлист", "Плейлист с таким названием уже существует."
             )
-            return
+            return None
 
         try:
             playlist = create_manual_playlist(self.playlists_dir, playlist_name)
         except FileExistsError as exc:
             QMessageBox.warning(self, "Плейлист", str(exc))
-            return
+            return None
         except ValueError as exc:
             QMessageBox.warning(self, "Плейлист", str(exc))
-            return
+            return None
 
         self.playlists.append(playlist)
         if self.library_view_mode != "playlists":
@@ -3926,6 +5890,7 @@ class MainWindow(QMainWindow):
         )
         self.playlist_list.setCurrentRow(row)
         self.on_playlist_selected(row)
+        return len(self.playlists) - 1
 
     def add_youtube_playlist(self) -> None:
         if self.youtube_thread is not None:
@@ -4998,6 +6963,8 @@ class MainWindow(QMainWindow):
             item = self.playlist_tracks_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                widget.hide()
+                widget.setParent(None)
                 widget.deleteLater()
 
     def track_latest_added_at(
@@ -5230,7 +7197,15 @@ class MainWindow(QMainWindow):
                 item.get("thumbnail_data"),
             )
             card.apply_theme(self.is_dark_theme())
+            self.configure_collection_playback_card(
+                card,
+                self.home_album_tracks_by_key.get(
+                    (str(item["album"]), str(item["author"])), []
+                ),
+            )
             card.clicked.connect(self.on_home_album_selected)
+            card.playback_requested.connect(self.on_album_playback_requested)
+            card.context_requested.connect(self.on_album_context_requested)
             card.delete_requested.connect(self.on_middle_album_delete_requested)
             grid_layout.addWidget(card, index // columns, index % columns)
         grid_layout.setColumnStretch(columns, 1)
@@ -5238,6 +7213,7 @@ class MainWindow(QMainWindow):
         return section
 
     def render_home_page(self) -> None:
+        self.update_tracks_context_label()
         self.search_results_active = False
         self.current_displayed_tracks = []
         self.remote_track_cards = []
@@ -5253,7 +7229,16 @@ class MainWindow(QMainWindow):
                 list(item["cover_items"]),
             )
             card.apply_theme(self.is_dark_theme())
+            playlist_index = int(item["playlist_index"])
+            playlist_tracks = (
+                self.playlists[playlist_index].tracks
+                if 0 <= playlist_index < len(self.playlists)
+                else []
+            )
+            self.configure_collection_playback_card(card, playlist_tracks)
             card.clicked.connect(self.on_search_playlist_selected)
+            card.playback_requested.connect(self.on_playlist_playback_requested)
+            card.context_requested.connect(self.on_playlist_card_context_requested)
             card.delete_requested.connect(self.on_middle_playlist_delete_requested)
             playlist_cards.append(card)
 
@@ -5307,12 +7292,17 @@ class MainWindow(QMainWindow):
                 card.selected.connect(self.on_remote_track_selected)
                 card.context_requested.connect(self.on_remote_track_context_requested)
                 card.status_requested.connect(self.on_remote_track_status_requested)
+                card.playback_requested.connect(self.on_track_playback_requested)
+                card.playback_seek_requested.connect(
+                    self.on_track_playback_seek_requested
+                )
                 card.reveal_requested.connect(
                     self.on_experimental_track_reveal_requested
                 )
                 card.delete_requested.connect(
                     self.on_experimental_track_delete_requested
                 )
+                self.configure_track_playback_card(card, track)
                 self.remote_track_cards.append(card)
                 self.playlist_tracks_layout.addWidget(card)
             self.current_displayed_tracks = singles
@@ -5352,12 +7342,17 @@ class MainWindow(QMainWindow):
         self.update_tracks_toolbar_visibility()
 
     def on_home_author_selected(self, author_name: str) -> None:
-        self.set_library_view_mode("authors")
-        for row, payload in enumerate(self.sidebar_items):
-            if payload.get("kind") == "author" and payload.get("author") == author_name:
-                self.playlist_list.setCurrentRow(row)
-                self.on_playlist_selected(row)
-                return
+        self.selected_author_name = author_name.strip()
+        self.selected_album_name = None
+        self.selected_playlist_index = None
+        self.experimental_source_mode = "author_albums"
+        self.current_collection_label = self.selected_author_name or "Авторы"
+        self.clear_experimental_track_selection()
+        self.render_author_album_cards(self.selected_author_name)
+        self.update_metadata_panel()
+        self.update_delete_files_checkbox_visibility()
+        self.update_start_button_state()
+        self.update_tracks_toolbar_visibility()
 
     def render_search_result_grid(
         self,
@@ -5399,6 +7394,7 @@ class MainWindow(QMainWindow):
         self.playlist_tracks_layout.addStretch(1)
 
     def render_author_album_cards(self, author_name: str) -> None:
+        self.update_tracks_context_label()
         author_name = str(author_name or "").strip()
         if not author_name:
             self.render_search_result_grid([], empty_text="Выберите автора")
@@ -5419,7 +7415,10 @@ class MainWindow(QMainWindow):
                 ),
             )
             card.apply_theme(self.is_dark_theme())
+            self.configure_collection_playback_card(card, tracks)
             card.clicked.connect(self.on_author_album_card_selected)
+            card.playback_requested.connect(self.on_album_playback_requested)
+            card.context_requested.connect(self.on_album_context_requested)
             card.delete_requested.connect(self.on_middle_album_delete_requested)
             cards.append(card)
 
@@ -5474,12 +7473,17 @@ class MainWindow(QMainWindow):
                 card.selected.connect(self.on_remote_track_selected)
                 card.context_requested.connect(self.on_remote_track_context_requested)
                 card.status_requested.connect(self.on_remote_track_status_requested)
+                card.playback_requested.connect(self.on_track_playback_requested)
+                card.playback_seek_requested.connect(
+                    self.on_track_playback_seek_requested
+                )
                 card.reveal_requested.connect(
                     self.on_experimental_track_reveal_requested
                 )
                 card.delete_requested.connect(
                     self.on_experimental_track_delete_requested
                 )
+                self.configure_track_playback_card(card, track)
                 self.remote_track_cards.append(card)
                 self.playlist_tracks_layout.addWidget(card)
 
@@ -5554,7 +7558,20 @@ class MainWindow(QMainWindow):
                     list(item["cover_items"]),
                 )
                 card.apply_theme(self.is_dark_theme())
+                playlist_index = int(item["playlist_index"])
+                playlist_tracks = (
+                    self.playlists[playlist_index].tracks
+                    if 0 <= playlist_index < len(self.playlists)
+                    else []
+                )
+                self.configure_collection_playback_card(card, playlist_tracks)
                 card.clicked.connect(self.on_search_playlist_selected)
+                card.playback_requested.connect(
+                    self.on_playlist_playback_requested
+                )
+                card.context_requested.connect(
+                    self.on_playlist_card_context_requested
+                )
                 card.delete_requested.connect(self.on_middle_playlist_delete_requested)
                 cards.append(card)
             self.render_search_result_grid(cards, empty_text="Плейлисты не найдены")
@@ -5573,7 +7590,16 @@ class MainWindow(QMainWindow):
                 item.get("thumbnail_data"),
             )
             card.apply_theme(self.is_dark_theme())
+            album_tracks = [
+                track
+                for track in self.local_music_tracks
+                if track.album.strip() == str(item["album"])
+                and track.artists.strip() == str(item["author"])
+            ]
+            self.configure_collection_playback_card(card, album_tracks)
             card.clicked.connect(self.on_search_album_selected)
+            card.playback_requested.connect(self.on_album_playback_requested)
+            card.context_requested.connect(self.on_album_context_requested)
             card.delete_requested.connect(self.on_middle_album_delete_requested)
             cards.append(card)
         self.render_search_result_grid(cards, empty_text="Альбомы не найдены")
@@ -5640,25 +7666,38 @@ class MainWindow(QMainWindow):
         self.track_search_edit.blockSignals(False)
         self.last_search_query = ""
         self.clear_track_search_focus()
-        if self.library_view_mode != "playlists":
-            self.set_library_view_mode("playlists")
-        row = next(
-            (
-                index
-                for index, payload in enumerate(self.sidebar_items)
-                if payload.get("kind") == "playlist"
-                and int(payload.get("playlist_index", -1)) == playlist_index
-            ),
-            -1,
-        )
-        if row >= 0:
-            self.playlist_list.setCurrentRow(row)
-            self.on_playlist_selected(row)
+        self.selected_author_name = None
+        self.selected_album_name = None
+        self.selected_playlist_index = playlist_index
+        self.experimental_source_mode = "playlist"
+        playlist = self.playlists[playlist_index]
+        if playlist.source == "manual":
+            playlist = load_manual_playlist(
+                playlist.source_url,
+                self.music_library_dir,
+            )
+            self.playlists[playlist_index] = playlist
+        self.current_collection_label = playlist.name
+        self.sort_field = "date"
+        self.sort_ascending = False
+        self.update_sort_button_labels()
+        self.clear_experimental_track_selection()
+        tracks = self.get_sorted_experimental_tracks(playlist.tracks)
+        if tracks:
+            self.selected_experimental_track_index = 0
+            self.selected_experimental_track_indexes = {0}
+            self.experimental_selection_anchor_index = 0
+        self.render_experimental_tracks(tracks)
+        self.update_metadata_panel()
+        self.update_delete_files_checkbox_visibility()
+        self.update_start_button_state()
+        self.update_tracks_toolbar_visibility()
 
     def render_experimental_tracks(
         self,
         tracks: list[RemoteTrack] | list[LocalMusicTrack],
     ) -> None:
+        self.update_tracks_context_label(tracks)
         self.search_results_active = False
         self.current_displayed_tracks = list(tracks)
         self.clear_track_results_layout()
@@ -5773,8 +7812,13 @@ class MainWindow(QMainWindow):
             card.selected.connect(self.on_remote_track_selected)
             card.context_requested.connect(self.on_remote_track_context_requested)
             card.status_requested.connect(self.on_remote_track_status_requested)
+            card.playback_requested.connect(self.on_track_playback_requested)
+            card.playback_seek_requested.connect(
+                self.on_track_playback_seek_requested
+            )
             card.reveal_requested.connect(self.on_experimental_track_reveal_requested)
             card.delete_requested.connect(self.on_experimental_track_delete_requested)
+            self.configure_track_playback_card(card, track)
             card.set_selected(track_index in self.selected_experimental_track_indexes)
             self.remote_track_cards.append(card)
             self.playlist_tracks_layout.addWidget(card)
@@ -5804,6 +7848,7 @@ class MainWindow(QMainWindow):
             reveal_action = menu.addAction("Открыть расположение")
             reveal_action.setEnabled(bool(self.get_track_file_path(selected_track)))
         add_to_playlist_action = menu.addAction("Добавить в плейлист")
+        play_next_action = menu.addAction("Играть следующим")
         delete_action = menu.addAction("Удалить")
 
         selected_action = menu.exec(global_pos)
@@ -5813,6 +7858,9 @@ class MainWindow(QMainWindow):
         if selected_action == add_to_playlist_action:
             self.add_selected_tracks_to_manual_playlist()
             return
+        if selected_action == play_next_action:
+            self.add_selected_tracks_to_play_next()
+            return
         if selected_action == delete_action:
             self.delete_selected_experimental_tracks()
 
@@ -5820,6 +7868,828 @@ class MainWindow(QMainWindow):
         if isinstance(track, LocalMusicTrack):
             return track.file_path
         return track.local_file_path
+
+    def normalized_track_file_path(
+        self, track: RemoteTrack | LocalMusicTrack
+    ) -> str:
+        file_path = self.get_track_file_path(track).strip()
+        if not file_path or not os.path.isfile(file_path):
+            return ""
+        return os.path.realpath(file_path)
+
+    def configure_track_playback_card(
+        self,
+        card: RemoteTrackCard,
+        track: RemoteTrack | LocalMusicTrack,
+    ) -> None:
+        file_path = self.normalized_track_file_path(track)
+        card.set_playback_icons(self.play_icon, self.pause_icon)
+        card.set_playback_available(bool(file_path))
+        duration = self.audio_player.duration() if hasattr(self, "audio_player") else 0
+        progress = (
+            self.audio_player.position() / duration
+            if file_path and file_path == self.playback_track_path and duration > 0
+            else 0.0
+        )
+        is_playing = (
+            file_path == self.playback_track_path
+            and self.audio_player.playbackState()
+            == QMediaPlayer.PlaybackState.PlayingState
+        )
+        card.update_playback_state(
+            is_playing,
+            progress,
+            is_current=(bool(file_path) and file_path == self.playback_track_path),
+        )
+
+    def configure_collection_playback_card(
+        self,
+        card: SearchAlbumCard | SearchPlaylistCard,
+        tracks: list[RemoteTrack] | list[LocalMusicTrack],
+    ) -> None:
+        paths = [
+            path
+            for track in tracks
+            if (path := self.normalized_track_file_path(track))
+        ]
+        card.collection_playback_paths = paths
+        card.set_playback_icons(self.play_icon, self.pause_icon)
+        card.set_playback_available(bool(paths))
+        self.update_collection_playback_card(card)
+
+    def update_collection_playback_card(
+        self, card: SearchAlbumCard | SearchPlaylistCard
+    ) -> None:
+        paths = list(getattr(card, "collection_playback_paths", []))
+        is_active = self.playback_collections_match(
+            paths, self.playback_source_queue
+        )
+        is_playing = (
+            is_active
+            and self.audio_player.playbackState()
+            == QMediaPlayer.PlaybackState.PlayingState
+        )
+        card.set_playback_state(is_active, is_playing)
+
+    def playback_collections_match(
+        self, first_paths: list[str], second_paths: list[str]
+    ) -> bool:
+        return (
+            bool(first_paths)
+            and len(first_paths) == len(second_paths)
+            and set(first_paths) == set(second_paths)
+        )
+
+    def on_album_playback_requested(
+        self, album_name: str, author_name: str
+    ) -> None:
+        tracks = [
+            track
+            for track in self.local_music_tracks
+            if track.album.strip() == album_name
+            and track.artists.strip() == author_name
+        ]
+        self.start_or_toggle_collection_playback(
+            tracks,
+            f"{author_name} — {album_name}" if author_name else album_name,
+        )
+
+    def on_playlist_playback_requested(self, playlist_index: int) -> None:
+        if not (0 <= playlist_index < len(self.playlists)):
+            return
+        playlist = self.playlists[playlist_index]
+        if playlist.source == "manual":
+            playlist = load_manual_playlist(
+                playlist.source_url,
+                self.music_library_dir,
+            )
+            self.playlists[playlist_index] = playlist
+        self.start_or_toggle_collection_playback(playlist.tracks, playlist.name)
+
+    def on_album_context_requested(
+        self, album_name: str, author_name: str, global_pos
+    ) -> None:
+        menu = QMenu(self)
+        play_next_action = menu.addAction("Играть следующим")
+        if menu.exec(global_pos) == play_next_action:
+            tracks = [
+                track
+                for track in self.local_music_tracks
+                if track.album.strip() == album_name
+                and track.artists.strip() == author_name
+            ]
+            self.insert_tracks_after_current(
+                self.order_collection_tracks_for_playback(tracks)
+            )
+
+    def on_playlist_card_context_requested(
+        self, playlist_index: int, global_pos
+    ) -> None:
+        menu = QMenu(self)
+        play_next_action = menu.addAction("Играть следующим")
+        if menu.exec(global_pos) == play_next_action:
+            self.add_playlist_to_play_next(playlist_index)
+
+    def add_playlist_to_play_next(self, playlist_index: int) -> None:
+        if not (0 <= playlist_index < len(self.playlists)):
+            return
+        playlist = self.playlists[playlist_index]
+        if playlist.source == "manual":
+            playlist = load_manual_playlist(
+                playlist.source_url,
+                self.music_library_dir,
+            )
+            self.playlists[playlist_index] = playlist
+        self.insert_tracks_after_current(
+            self.order_collection_tracks_for_playback(playlist.tracks)
+        )
+
+    def add_selected_tracks_to_play_next(self) -> None:
+        self.insert_tracks_after_current(
+            self.get_selected_experimental_tracks()
+        )
+
+    def insert_tracks_after_current(
+        self,
+        tracks: list[RemoteTrack] | list[LocalMusicTrack],
+    ) -> None:
+        requested_paths: list[str] = []
+        for track in tracks:
+            path = self.normalized_track_file_path(track)
+            if path and path not in requested_paths:
+                requested_paths.append(path)
+        if not requested_paths:
+            self.show_toast(
+                "Нет доступных локальных треков для очереди",
+                success=False,
+            )
+            return
+
+        self.cancel_crossfade()
+        current_index = self.playback_queue_index
+        if (
+            self.playback_queue
+            and 0 <= current_index < len(self.playback_queue)
+        ):
+            prefix = self.playback_queue[: current_index + 1]
+            tail = [
+                path
+                for path in self.playback_queue[current_index + 1 :]
+                if path not in requested_paths
+            ]
+            self.playback_queue = [*prefix, *requested_paths, *tail]
+        elif self.playback_track_path and os.path.isfile(
+            self.playback_track_path
+        ):
+            current_path = os.path.realpath(self.playback_track_path)
+            tail = [path for path in requested_paths if path != current_path]
+            self.playback_queue = [current_path, *tail]
+            self.playback_queue_index = 0
+        else:
+            self.playback_queue = list(requested_paths)
+            self.playback_queue_index = 0
+            self.playback_source_queue = list(self.playback_queue)
+            self.start_playback_path(self.playback_queue[0])
+            self.show_toast(
+                f"Добавлено следующим: {len(requested_paths)}",
+                success=True,
+            )
+            return
+
+        self.playback_source_queue = list(self.playback_queue)
+        self.refresh_playback_cards()
+        self.refresh_playback_panel()
+        self.persist_playback_session()
+        self.show_toast(
+            f"Добавлено следующим: {len(requested_paths)}",
+            success=True,
+        )
+
+    def start_or_toggle_collection_playback(
+        self,
+        tracks: list[RemoteTrack] | list[LocalMusicTrack],
+        context_title: str,
+    ) -> None:
+        ordered_tracks = self.order_collection_tracks_for_playback(tracks)
+        paths = [
+            path
+            for track in ordered_tracks
+            if (path := self.normalized_track_file_path(track))
+        ]
+        if not paths:
+            self.show_toast("В коллекции нет доступных локальных треков", success=False)
+            return
+        if (
+            self.playback_collections_match(paths, self.playback_source_queue)
+            and self.playback_track_path in paths
+        ):
+            self.toggle_footer_playback()
+            return
+
+        self.audio_player.stop()
+        self.playback_source_queue = list(paths)
+        self.playback_queue = list(paths)
+        self.playback_context_title = context_title.strip()
+        if self.shuffle_enabled:
+            random.shuffle(self.playback_queue)
+        self.playback_queue_index = 0
+        self.start_playback_path(self.playback_queue[0])
+
+    def order_collection_tracks_for_playback(
+        self,
+        tracks: list[RemoteTrack] | list[LocalMusicTrack],
+    ) -> list[RemoteTrack] | list[LocalMusicTrack]:
+        indexed_tracks = list(enumerate(tracks))
+        if not any(
+            isinstance(track, LocalMusicTrack) and track.track_number > 0
+            for _, track in indexed_tracks
+        ):
+            return [track for _, track in indexed_tracks]
+        indexed_tracks.sort(
+            key=lambda item: (
+                0
+                if isinstance(item[1], LocalMusicTrack)
+                and item[1].track_number > 0
+                else 1,
+                item[1].track_number
+                if isinstance(item[1], LocalMusicTrack)
+                and item[1].track_number > 0
+                else 0,
+                item[0],
+            )
+        )
+        return [track for _, track in indexed_tracks]
+
+    def on_track_playback_requested(self, index: int) -> None:
+        if not (0 <= index < len(self.current_displayed_tracks)):
+            return
+        requested_path = self.normalized_track_file_path(
+            self.current_displayed_tracks[index]
+        )
+        if not requested_path:
+            self.show_toast("Локальный mp3-файл трека не найден", success=False)
+            return
+
+        if requested_path == self.playback_track_path:
+            if (
+                self.audio_player.playbackState()
+                == QMediaPlayer.PlaybackState.PlayingState
+            ):
+                self.pause_audio_playback()
+            else:
+                self.audio_player.play()
+            return
+
+        self.audio_player.stop()
+        self.playback_source_queue = [
+            path
+            for track in self.current_displayed_tracks
+            if (path := self.normalized_track_file_path(track))
+        ]
+        self.playback_context_title = self.current_playback_context(
+            len(self.playback_source_queue)
+        )
+        self.playback_queue = list(self.playback_source_queue)
+        if self.shuffle_enabled:
+            other_paths = [path for path in self.playback_queue if path != requested_path]
+            random.shuffle(other_paths)
+            self.playback_queue = [requested_path, *other_paths]
+        try:
+            self.playback_queue_index = self.playback_queue.index(requested_path)
+        except ValueError:
+            self.playback_queue = [requested_path]
+            self.playback_source_queue = [requested_path]
+            self.playback_queue_index = 0
+        self.start_playback_path(requested_path)
+
+    def on_track_playback_seek_requested(
+        self, index: int, fraction: float
+    ) -> None:
+        if not (0 <= index < len(self.current_displayed_tracks)):
+            return
+        file_path = self.normalized_track_file_path(
+            self.current_displayed_tracks[index]
+        )
+        if file_path != self.playback_track_path:
+            return
+        self.seek_playback(fraction)
+
+    def seek_playback(self, fraction: float) -> None:
+        duration = self.audio_player.duration()
+        if not self.playback_track_path or duration <= 0:
+            return
+        normalized_fraction = max(0.0, min(1.0, float(fraction)))
+        self.audio_player.setPosition(round(duration * normalized_fraction))
+
+    def remember_playback_track(self, file_path: str) -> None:
+        if not file_path or not os.path.isfile(file_path):
+            return
+        normalized_path = os.path.realpath(file_path)
+        if self.playback_history and self.playback_history[-1] == normalized_path:
+            return
+        self.playback_history.append(normalized_path)
+        del self.playback_history[:-200]
+
+    def record_playback_log_entry(self, file_path: str) -> None:
+        if not file_path or not os.path.isfile(file_path):
+            return
+        self.playback_log.append(os.path.realpath(file_path))
+        del self.playback_log[:-500]
+        if self.right_panel_mode == "history":
+            self.refresh_playback_history()
+
+    def start_playback_path(
+        self,
+        file_path: str,
+        transition_direction: int = 1,
+        *,
+        record_history: bool = True,
+    ) -> None:
+        self.cancel_crossfade()
+        if self.playback_track_path and file_path != self.playback_track_path:
+            previous_track_path = self.playback_track_path
+            if record_history:
+                self.remember_playback_track(previous_track_path)
+            self.record_playback_log_entry(previous_track_path)
+        if file_path != self.playback_track_path:
+            self.pending_disc_transition_direction = (
+                1 if transition_direction >= 0 else -1
+            )
+        self.playback_track_path = file_path
+        self.audio_player.setSource(QUrl.fromLocalFile(file_path))
+        self.apply_audio_output_volumes()
+        self.audio_player.play()
+        track = self.find_track_by_file_path(file_path)
+        self.system_now_playing.set_track(
+            title=track.title if track else os.path.splitext(os.path.basename(file_path))[0],
+            artist=track.artists if track else "Неизвестный автор",
+            album=track.album if track else "",
+            artwork_data=track.thumbnail_data if track else None,
+            duration_seconds=self.audio_player.duration() / 1000.0,
+            position_seconds=0.0,
+            playing=True,
+        )
+        self.refresh_playback_cards()
+        self.refresh_playback_panel()
+
+    def toggle_footer_playback(self) -> None:
+        if self.crossfade_active:
+            self.pause_audio_playback()
+            return
+        if not self.playback_track_path:
+            available_paths = [
+                path
+                for track in self.current_displayed_tracks
+                if (path := self.normalized_track_file_path(track))
+            ]
+            if not available_paths:
+                return
+            self.playback_queue = available_paths
+            self.playback_source_queue = list(available_paths)
+            self.playback_context_title = self.current_playback_context(
+                len(available_paths)
+            )
+            if self.shuffle_enabled:
+                random.shuffle(self.playback_queue)
+            self.playback_queue_index = 0
+            self.start_playback_path(self.playback_queue[0])
+            return
+        if (
+            self.audio_player.playbackState()
+            == QMediaPlayer.PlaybackState.PlayingState
+        ):
+            self.pause_audio_playback()
+        else:
+            self.audio_player.play()
+
+    def pause_audio_playback(self) -> None:
+        if self.crossfade_active:
+            self.finish_crossfade()
+        self.audio_player.pause()
+
+    def play_previous_track(self) -> None:
+        self.cancel_crossfade()
+        previous_path = ""
+        while self.playback_history and not previous_path:
+            candidate = self.playback_history.pop()
+            if os.path.isfile(candidate) and candidate != self.playback_track_path:
+                previous_path = candidate
+        if not previous_path:
+            previous_index = self.playback_queue_index - 1
+            if previous_index < 0 or previous_index >= len(self.playback_queue):
+                return
+            previous_path = self.playback_queue[previous_index]
+        else:
+            try:
+                previous_index = self.playback_queue.index(previous_path)
+            except ValueError:
+                insertion_index = max(0, self.playback_queue_index)
+                self.playback_queue.insert(insertion_index, previous_path)
+                self.playback_source_queue = list(self.playback_queue)
+                previous_index = insertion_index
+        self.audio_player.stop()
+        self.playback_queue_index = previous_index
+        self.start_playback_path(
+            previous_path,
+            transition_direction=-1,
+            record_history=False,
+        )
+
+    def play_next_track(self) -> None:
+        self.cancel_crossfade()
+        next_index = self.playback_queue_index + 1
+        if next_index >= len(self.playback_queue) and self.repeat_mode == 1:
+            next_index = 0
+        if next_index < 0 or next_index >= len(self.playback_queue):
+            return
+        self.audio_player.stop()
+        self.playback_queue_index = next_index
+        self.start_playback_path(self.playback_queue[next_index])
+
+    def toggle_shuffle_mode(self) -> None:
+        self.shuffle_enabled = not self.shuffle_enabled
+        if self.playback_track_path and self.playback_source_queue:
+            if self.shuffle_enabled:
+                other_paths = [
+                    path
+                    for path in self.playback_source_queue
+                    if path != self.playback_track_path
+                ]
+                random.shuffle(other_paths)
+                self.playback_queue = [self.playback_track_path, *other_paths]
+                self.playback_queue_index = 0
+            else:
+                self.playback_queue = list(self.playback_source_queue)
+                try:
+                    self.playback_queue_index = self.playback_queue.index(
+                        self.playback_track_path
+                    )
+                except ValueError:
+                    self.playback_queue_index = 0
+        self.update_footer_playback_modes()
+        self.refresh_playback_cards()
+        self.refresh_playback_panel()
+
+    def cycle_repeat_mode(self) -> None:
+        self.repeat_mode = (self.repeat_mode + 1) % 3
+        self.update_footer_playback_modes()
+
+    def set_audio_volume(self, value: int) -> None:
+        normalized_value = max(0, min(100, int(value)))
+        if normalized_value > 0:
+            self.last_nonzero_volume = normalized_value
+        self.apply_audio_output_volumes(normalized_value / 100.0)
+        self.footer_volume_slider.setToolTip(f"Громкость: {normalized_value}%")
+        self.update_volume_icon(normalized_value)
+
+    def normalized_output_volume(self, base_volume: float, file_path: str) -> float:
+        factor = (
+            replaygain_volume_factor(file_path)
+            if self.volume_normalization_enabled and file_path
+            else 1.0
+        )
+        return max(0.0, min(1.0, base_volume * factor))
+
+    def apply_audio_output_volumes(self, base_volume: float | None = None) -> None:
+        if base_volume is None:
+            base_volume = self.footer_volume_slider.value() / 100.0
+        if self.crossfade_active:
+            fraction = min(
+                1.0,
+                self.crossfade_elapsed_ms / max(1, self.crossfade_seconds * 1000),
+            )
+            self.audio_output.setVolume(
+                self.normalized_output_volume(
+                    base_volume * (1.0 - fraction), self.playback_track_path
+                )
+            )
+            self.crossfade_audio_output.setVolume(
+                self.normalized_output_volume(
+                    base_volume * fraction, self.crossfade_target_path
+                )
+            )
+        else:
+            self.audio_output.setVolume(
+                self.normalized_output_volume(base_volume, self.playback_track_path)
+            )
+
+    def toggle_audio_mute(self) -> None:
+        if self.footer_volume_slider.value() > 0:
+            self.last_nonzero_volume = self.footer_volume_slider.value()
+            self.footer_volume_slider.setValue(0)
+        else:
+            self.footer_volume_slider.setValue(max(1, self.last_nonzero_volume))
+
+    def update_volume_icon(self, volume: int | None = None) -> None:
+        if not hasattr(self, "footer_volume_button"):
+            return
+        current_volume = (
+            self.footer_volume_slider.value() if volume is None else int(volume)
+        )
+        if current_volume <= 0:
+            icon = self.volume_off_icon
+            tooltip = "Вернуть звук"
+        elif current_volume <= 80:
+            icon = self.volume_mid_icon
+            tooltip = "Выключить звук"
+        else:
+            icon = self.volume_max_icon
+            tooltip = "Выключить звук"
+        self.footer_volume_button.setIcon(icon)
+        self.footer_volume_button.setToolTip(tooltip)
+
+    def update_footer_playback_modes(self) -> None:
+        if not hasattr(self, "footer_repeat_button"):
+            return
+        self.footer_repeat_badge.setVisible(self.repeat_mode == 2)
+        repeat_tooltips = {
+            0: "Повтор выключен",
+            1: "Повтор очереди",
+            2: "Повтор текущего трека",
+        }
+        self.footer_repeat_button.setToolTip(repeat_tooltips[self.repeat_mode])
+        self.apply_footer_playback_mode_styles()
+
+    def next_crossfade_queue_index(self) -> int:
+        if self.repeat_mode == 2 or not self.playback_queue:
+            return -1
+        next_index = self.playback_queue_index + 1
+        if next_index < len(self.playback_queue):
+            return next_index
+        if self.repeat_mode != 1:
+            return -1
+        if self.shuffle_enabled and len(self.playback_queue) > 1:
+            previous_path = self.playback_track_path
+            random.shuffle(self.playback_queue)
+            if self.playback_queue[0] == previous_path:
+                self.playback_queue.append(self.playback_queue.pop(0))
+        return 0
+
+    def maybe_start_crossfade(self) -> None:
+        if (
+            not self.crossfade_enabled
+            or self.crossfade_active
+            or self.audio_player.playbackState()
+            != QMediaPlayer.PlaybackState.PlayingState
+        ):
+            return
+        duration = self.audio_player.duration()
+        fade_duration = self.crossfade_seconds * 1000
+        remaining_ms = duration - self.audio_player.position()
+        if duration <= fade_duration or remaining_ms > fade_duration:
+            return
+        next_index = self.next_crossfade_queue_index()
+        if not (0 <= next_index < len(self.playback_queue)):
+            return
+        target_path = self.playback_queue[next_index]
+        if not target_path or not os.path.isfile(target_path):
+            return
+        self.crossfade_active = True
+        self.crossfade_elapsed_ms = max(0, fade_duration - remaining_ms)
+        self.crossfade_target_index = next_index
+        self.crossfade_target_path = target_path
+        self.crossfade_audio_output.setDevice(self.audio_output.device())
+        self.crossfade_audio_output.setVolume(0.0)
+        self.crossfade_player.setSource(QUrl.fromLocalFile(target_path))
+        self.crossfade_player.play()
+        self.crossfade_timer.start()
+
+    def advance_crossfade(self) -> None:
+        if not self.crossfade_active:
+            self.crossfade_timer.stop()
+            return
+        self.crossfade_elapsed_ms += self.crossfade_timer.interval()
+        duration_ms = max(1, self.crossfade_seconds * 1000)
+        fraction = min(1.0, self.crossfade_elapsed_ms / duration_ms)
+        self.apply_audio_output_volumes()
+        if fraction >= 1.0:
+            self.finish_crossfade()
+
+    def disconnect_primary_player_signals(self) -> None:
+        connections = (
+            (self.audio_player.positionChanged, self.on_playback_position_changed),
+            (self.audio_player.durationChanged, self.on_playback_duration_changed),
+            (self.audio_player.playbackStateChanged, self.on_playback_state_changed),
+            (self.audio_player.mediaStatusChanged, self.on_playback_media_status_changed),
+            (self.audio_player.errorOccurred, self.on_playback_error),
+        )
+        for signal, handler in connections:
+            try:
+                signal.disconnect(handler)
+            except (TypeError, RuntimeError):
+                pass
+
+    def connect_primary_player_signals(self) -> None:
+        self.audio_player.positionChanged.connect(self.on_playback_position_changed)
+        self.audio_player.durationChanged.connect(self.on_playback_duration_changed)
+        self.audio_player.playbackStateChanged.connect(self.on_playback_state_changed)
+        self.audio_player.mediaStatusChanged.connect(self.on_playback_media_status_changed)
+        self.audio_player.errorOccurred.connect(self.on_playback_error)
+
+    def finish_crossfade(self) -> None:
+        if not self.crossfade_active:
+            return
+        previous_track_path = self.playback_track_path
+        self.crossfade_timer.stop()
+        old_player = self.audio_player
+        old_output = self.audio_output
+        self.disconnect_primary_player_signals()
+        self.audio_player = self.crossfade_player
+        self.audio_output = self.crossfade_audio_output
+        self.crossfade_player = old_player
+        self.crossfade_audio_output = old_output
+        self.connect_primary_player_signals()
+        self.crossfade_player.stop()
+        self.crossfade_audio_output.setVolume(0.0)
+        self.playback_queue_index = self.crossfade_target_index
+        self.playback_track_path = self.crossfade_target_path
+        if previous_track_path != self.playback_track_path:
+            self.remember_playback_track(previous_track_path)
+            self.record_playback_log_entry(previous_track_path)
+        self.apply_audio_output_volumes()
+        self.pending_disc_transition_direction = 1
+        self.crossfade_active = False
+        self.crossfade_elapsed_ms = 0
+        track = self.find_track_by_file_path(self.playback_track_path)
+        self.system_now_playing.set_track(
+            title=track.title if track else os.path.splitext(os.path.basename(self.playback_track_path))[0],
+            artist=track.artists if track else "Неизвестный автор",
+            album=track.album if track else "",
+            artwork_data=track.thumbnail_data if track else None,
+            duration_seconds=self.audio_player.duration() / 1000.0,
+            position_seconds=self.audio_player.position() / 1000.0,
+            playing=True,
+        )
+        self.refresh_playback_cards()
+        self.refresh_playback_panel()
+
+    def cancel_crossfade(self) -> None:
+        if not hasattr(self, "crossfade_timer"):
+            return
+        self.crossfade_timer.stop()
+        self.crossfade_player.stop()
+        self.crossfade_audio_output.setVolume(0.0)
+        if hasattr(self, "footer_volume_slider"):
+            self.audio_output.setVolume(
+                self.normalized_output_volume(
+                    self.footer_volume_slider.value() / 100.0,
+                    self.playback_track_path,
+                )
+            )
+        self.crossfade_active = False
+        self.crossfade_elapsed_ms = 0
+        self.crossfade_target_index = -1
+        self.crossfade_target_path = ""
+
+    def on_playback_position_changed(self, _position: int) -> None:
+        self.maybe_start_crossfade()
+        self.refresh_playback_cards()
+        self.update_system_now_playing()
+
+    def on_playback_duration_changed(self, _duration: int) -> None:
+        if self.audio_player.mediaStatus() in {
+            QMediaPlayer.MediaStatus.LoadedMedia,
+            QMediaPlayer.MediaStatus.BufferedMedia,
+        }:
+            self.apply_pending_restore_position()
+        self.refresh_playback_cards()
+        self.update_system_now_playing()
+
+    def on_playback_state_changed(self, _state) -> None:
+        self.refresh_playback_cards()
+        self.update_system_now_playing()
+
+    def update_system_now_playing(self) -> None:
+        self.system_now_playing.update_playback(
+            position_seconds=self.audio_player.position() / 1000.0,
+            duration_seconds=self.audio_player.duration() / 1000.0,
+            playing=(
+                self.audio_player.playbackState()
+                == QMediaPlayer.PlaybackState.PlayingState
+            ),
+        )
+
+    def on_playback_media_status_changed(self, status) -> None:
+        if status in {
+            QMediaPlayer.MediaStatus.LoadedMedia,
+            QMediaPlayer.MediaStatus.BufferedMedia,
+        }:
+            QTimer.singleShot(0, self.apply_pending_restore_position)
+            return
+        if status != QMediaPlayer.MediaStatus.EndOfMedia:
+            return
+        if self.crossfade_active:
+            return
+        if self.repeat_mode == 2 and self.playback_track_path:
+            self.audio_player.setPosition(0)
+            self.audio_player.play()
+            return
+        next_index = self.playback_queue_index + 1
+        if next_index >= len(self.playback_queue) and self.repeat_mode == 1:
+            if self.shuffle_enabled and len(self.playback_queue) > 1:
+                previous_path = self.playback_track_path
+                random.shuffle(self.playback_queue)
+                if self.playback_queue[0] == previous_path:
+                    self.playback_queue.append(self.playback_queue.pop(0))
+            next_index = 0
+        if next_index < len(self.playback_queue):
+            self.playback_queue_index = next_index
+            self.start_playback_path(self.playback_queue[next_index])
+            return
+        self.system_now_playing.update_playback(
+            position_seconds=self.audio_player.duration() / 1000.0,
+            duration_seconds=self.audio_player.duration() / 1000.0,
+            playing=False,
+        )
+        self.refresh_playback_cards()
+        self.refresh_playback_panel()
+
+    def apply_pending_restore_position(self) -> None:
+        if self.pending_restore_position_ms < 0:
+            return
+        duration = self.audio_player.duration()
+        if duration <= 0:
+            return
+        restored_position = min(
+            self.pending_restore_position_ms,
+            max(0, duration - 250),
+        )
+        self.pending_restore_position_ms = -1
+        self.audio_player.setPosition(restored_position)
+        self.refresh_playback_cards()
+        self.update_system_now_playing()
+
+    def on_playback_error(self, *_args) -> None:
+        error_text = self.audio_player.errorString().strip()
+        if error_text:
+            self.show_toast(f"Не удалось воспроизвести трек: {error_text}", success=False)
+        self.playback_track_path = ""
+        self.system_now_playing.clear()
+        self.refresh_playback_cards()
+        self.refresh_playback_panel()
+
+    def refresh_playback_cards(self) -> None:
+        duration = self.audio_player.duration()
+        progress = (
+            self.audio_player.position() / duration
+            if self.playback_track_path and duration > 0
+            else 0.0
+        )
+        is_playing = (
+            self.audio_player.playbackState()
+            == QMediaPlayer.PlaybackState.PlayingState
+        )
+        for index, card in enumerate(self.remote_track_cards):
+            track = (
+                self.current_displayed_tracks[index]
+                if index < len(self.current_displayed_tracks)
+                else None
+            )
+            file_path = self.normalized_track_file_path(track) if track else ""
+            card.set_playback_available(bool(file_path))
+            card.update_playback_state(
+                is_playing and file_path == self.playback_track_path,
+                progress if file_path == self.playback_track_path else 0.0,
+                is_current=(
+                    bool(file_path) and file_path == self.playback_track_path
+                ),
+            )
+        if hasattr(self, "playlist_tracks_container"):
+            collection_cards = [
+                *self.playlist_tracks_container.findChildren(SearchAlbumCard),
+                *self.playlist_tracks_container.findChildren(SearchPlaylistCard),
+            ]
+            for card in collection_cards:
+                self.update_collection_playback_card(card)
+        if hasattr(self, "footer_playback_progress"):
+            if not self.footer_playback_progress.is_dragging:
+                self.footer_playback_progress.setValue(int(progress * 1000))
+            self.footer_play_button.setIcon(
+                self.pause_icon if is_playing else self.play_icon
+            )
+            self.footer_play_button.setToolTip(
+                "Пауза" if is_playing else "Воспроизвести"
+            )
+            has_current_track = bool(self.playback_track_path)
+            has_visible_track = any(
+                self.normalized_track_file_path(track)
+                for track in self.current_displayed_tracks
+            )
+            self.footer_play_button.setEnabled(
+                has_current_track or has_visible_track
+            )
+            self.footer_previous_button.setEnabled(
+                has_current_track and self.playback_queue_index > 0
+            )
+            self.footer_next_button.setEnabled(
+                has_current_track
+                and (
+                    self.playback_queue_index + 1 < len(self.playback_queue)
+                    or (self.repeat_mode == 1 and bool(self.playback_queue))
+                )
+            )
+        if hasattr(self, "playback_cover_label"):
+            self.playback_cover_label.set_playing(is_playing)
 
     def reveal_experimental_track_in_file_manager(self, index: int) -> None:
         tracks = self.get_current_experimental_tracks()
@@ -6027,43 +8897,84 @@ class MainWindow(QMainWindow):
             if playlist.source == "manual"
         ]
         if not manual_playlists:
-            QMessageBox.information(
-                self,
-                "Добавить в плейлист",
-                "Сначала создайте хотя бы один ручной плейлист.",
+            target_index = self.add_manual_playlist()
+            if target_index is None:
+                return
+            self.append_file_paths_to_manual_playlist(
+                target_index, selected_file_paths
             )
             return
 
-        playlist_names = [playlist.name for _, playlist in manual_playlists]
-        selected_name, accepted = QInputDialog.getItem(
-            self,
-            "Добавить в плейлист",
-            "Выберите плейлист:",
-            playlist_names,
-            0,
-            False,
-        )
-        if not accepted or not selected_name:
-            return
-
-        target_index = next(
-            (
-                index
-                for index, playlist in manual_playlists
-                if playlist.name == selected_name
-            ),
-            None,
+        target_index = self.choose_manual_playlist_for_tracks(
+            manual_playlists
         )
         if target_index is None:
             return
+        if target_index == -1:
+            target_index = self.add_manual_playlist()
+        if target_index is None:
+            return
 
+        self.append_file_paths_to_manual_playlist(
+            target_index, selected_file_paths
+        )
+
+    def choose_manual_playlist_for_tracks(
+        self, manual_playlists: list[tuple[int, PlaylistEntry]]
+    ) -> int | None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Добавить в плейлист")
+        self.style_simple_dialog(dialog)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+        layout.addWidget(QLabel("Выберите плейлист:"))
+
+        playlist_combo = QComboBox()
+        playlist_combo.addItem("Создать новый", -1)
+        for playlist_index, playlist in manual_playlists:
+            playlist_combo.addItem(playlist.name, playlist_index)
+        layout.addWidget(playlist_combo)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        cancel_button = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        if ok_button is not None:
+            ok_button.setText("Выбрать")
+        if cancel_button is not None:
+            cancel_button.setText("Отмена")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.resize(520, dialog.sizeHint().height())
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        selected_index = playlist_combo.currentData()
+        return int(selected_index) if selected_index is not None else None
+
+    def append_file_paths_to_manual_playlist(
+        self, target_index: int, selected_file_paths: list[str]
+    ) -> None:
+        if not (0 <= target_index < len(self.playlists)):
+            return
+        target_playlist = self.playlists[target_index]
+        if target_playlist.source != "manual":
+            return
         updated_playlist = append_tracks_to_manual_playlist(
-            self.playlists[target_index].source_url,
+            target_playlist.source_url,
             selected_file_paths,
             self.music_library_dir,
         )
         self.playlists[target_index] = updated_playlist
-        self.playlist_item_widgets[target_index].set_title(updated_playlist.name)
+        if 0 <= target_index < len(self.playlist_item_widgets):
+            self.playlist_item_widgets[target_index].set_title(
+                updated_playlist.name
+            )
         if self.selected_playlist_index == target_index:
             self.on_playlist_selected(target_index)
 
@@ -6443,6 +9354,7 @@ class MainWindow(QMainWindow):
         self.open_folder_icon = QIcon(self.themed_icon_path("folder"))
         self.reveal_icon = QIcon(self.themed_icon_path("open_folder"))
         self.gear_icon = QIcon(self.themed_icon_path("gear"))
+        self.update_icon = QIcon(self.themed_icon_path("update"))
         self.add_playlist_icon = QIcon(self.themed_icon_path("add_playlist"))
         self.add_track_icon = self.themed_raster_icon("track", 20)
         self.add_list_icon = self.themed_raster_icon("list", 20)
@@ -6458,6 +9370,21 @@ class MainWindow(QMainWindow):
         self.delete_icon = QIcon(self.themed_icon_path("delete"))
         self.sort_date_icon = QIcon(self.themed_icon_path("number"))
         self.sort_title_icon = QIcon(self.themed_icon_path("by_name"))
+        self.play_icon = QIcon(self.themed_icon_path("play"))
+        self.pause_icon = QIcon(self.themed_icon_path("pause"))
+        self.previous_icon = QIcon(self.themed_icon_path("previous"))
+        self.next_icon = QIcon(self.themed_icon_path("next"))
+        self.download_icon = QIcon(self.themed_icon_path("download"))
+        self.volume_off_icon = QIcon(self.themed_icon_path("volume-off"))
+        self.volume_mid_icon = QIcon(self.themed_icon_path("volume-mid"))
+        self.volume_max_icon = QIcon(self.themed_icon_path("volume-max"))
+        self.script_icon = QIcon(self.themed_icon_path("script"))
+        self.queue_icon = QIcon(self.themed_icon_path("queue"))
+        self.history_icon = QIcon(self.themed_icon_path("history"))
+        self.loop_icon = QIcon(self.themed_icon_path("loop"))
+        self.shuffle_icon = QIcon(self.themed_icon_path("shuffle"))
+        self.monitor_icon = QIcon(self.themed_icon_path("monitor"))
+        self.headphones_icon = QIcon(self.themed_icon_path("headphones"))
         self.status_icons = {
             STATUS_PENDING: QIcon(self.themed_icon_path("to_download")),
             STATUS_META_LOADING: QIcon(self.themed_icon_path("downloading")),
@@ -6476,7 +9403,7 @@ class MainWindow(QMainWindow):
             self.open_music_folder_button.setIconSize(QSize(18, 18))
         if hasattr(self, "create_playlist_button"):
             self.create_playlist_button.setIcon(self.add_playlist_icon)
-            self.create_playlist_button.setIconSize(QSize(18, 18))
+            self.create_playlist_button.setIconSize(QSize(28, 28))
         if hasattr(self, "add_track_action"):
             self.add_track_action.setIcon(self.add_track_icon)
         if hasattr(self, "add_list_action"):
@@ -6544,7 +9471,7 @@ class MainWindow(QMainWindow):
         ]:
             if button is not None:
                 button.setIcon(self.save_icon)
-                button.setIconSize(QSize(18, 18))
+                button.setIconSize(QSize(16, 16))
         for button in [
             getattr(self, "metadata_cancel_button", None),
             getattr(self, "metadata_album_cancel_button", None),
@@ -6552,7 +9479,7 @@ class MainWindow(QMainWindow):
         ]:
             if button is not None:
                 button.setIcon(self.reset_icon)
-                button.setIconSize(QSize(18, 18))
+                button.setIconSize(QSize(16, 16))
         if hasattr(self, "sort_date_button"):
             self.sort_date_button.setIcon(self.sort_date_icon)
             self.sort_date_button.setIconSize(QSize(18, 18))
@@ -6564,6 +9491,35 @@ class MainWindow(QMainWindow):
                 self.search_icon.pixmap(QSize(16, 16))
             )
             self.position_track_search_icon()
+        if hasattr(self, "footer_previous_button"):
+            self.footer_previous_button.setIcon(self.previous_icon)
+            self.footer_next_button.setIcon(self.next_icon)
+            self.footer_repeat_button.setIcon(self.loop_icon)
+            self.footer_shuffle_button.setIcon(self.shuffle_icon)
+            self.footer_play_button.setIcon(
+                self.pause_icon
+                if self.audio_player.playbackState()
+                == QMediaPlayer.PlaybackState.PlayingState
+                else self.play_icon
+            )
+        if hasattr(self, "downloads_button"):
+            self.downloads_button.setIcon(self.download_icon)
+            self.downloads_button.setIconSize(QSize(18, 18))
+        if hasattr(self, "footer_script_button"):
+            self.footer_script_button.setIcon(
+                self.queue_icon
+                if self.right_panel_mode == "playback"
+                else (
+                    self.history_icon
+                    if self.right_panel_mode == "history"
+                    else self.script_icon
+                )
+            )
+            self.footer_metadata_action.setIcon(self.script_icon)
+            self.footer_current_track_action.setIcon(self.queue_icon)
+            self.footer_history_action.setIcon(self.history_icon)
+            self.update_volume_icon()
+            self.rebuild_audio_output_menu()
         for widget in self.playlist_item_widgets:
             widget.set_loading_icon(self.playlist_loading_icon)
             widget.set_reveal_icon(self.reveal_icon)
@@ -6575,6 +9531,14 @@ class MainWindow(QMainWindow):
         for card in self.remote_track_cards:
             card.set_status_icons(self.status_icons)
             card.set_reveal_icon(self.reveal_icon)
+            card.set_playback_icons(self.play_icon, self.pause_icon)
+        if hasattr(self, "playlist_tracks_container"):
+            collection_cards = [
+                *self.playlist_tracks_container.findChildren(SearchAlbumCard),
+                *self.playlist_tracks_container.findChildren(SearchPlaylistCard),
+            ]
+            for card in collection_cards:
+                card.set_playback_icons(self.play_icon, self.pause_icon)
         for card in self.download_queue_cards:
             card.set_status_icons(self.status_icons)
 

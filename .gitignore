@@ -2,6 +2,7 @@
 .cache
 .elenveil/
 .vnv/
+.pyinstaller/
 
 __pycache__/
 *.py[cod]

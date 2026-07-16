@@ -1,3 +1,5 @@
 mutagen>=1.47.0
 PyQt6>=6.7.0
 yt-dlp>=2026.3.17
+pyobjc-framework-MediaPlayer; sys_platform == "darwin"
+pyobjc-framework-Cocoa; sys_platform == "darwin"

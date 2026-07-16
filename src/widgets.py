@@ -1,5 +1,5 @@
-from PyQt6.QtCore import QEvent, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PyQt6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QConicalGradient, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox,
     QFrame,
@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QToolButton,
     QVBoxLayout,
+    QWidget,
 )
 
 from .models import (
@@ -23,6 +24,60 @@ from .models import (
     PlaylistEntry,
     RemoteTrack,
 )
+from .themes import theme_colors, theme_is_dark
+
+
+_ELEMENT_BACKGROUND_OPACITY = 0.88
+
+
+def set_element_background_transparency(percent: int) -> None:
+    global _ELEMENT_BACKGROUND_OPACITY
+    _ELEMENT_BACKGROUND_OPACITY = max(0.1, 1.0 - min(90, max(0, percent)) / 100.0)
+
+
+def element_background(color_value: str) -> str:
+    normalized = color_value.casefold()
+    dark_tokens = {
+        "#303030": "button_bg",
+        "#303236": "button_bg",
+        "#32363d": "button_bg",
+        "#2e3136": "button_bg",
+        "#292929": "button_disabled_bg",
+        "#242424": "list_bg",
+        "#1f232a": "list_bg",
+        "#262a31": "button_bg",
+        "#35383d": "panel_bg",
+        "#505050": "button_hover",
+        "#565656": "button_hover",
+        "#202020": "panel_bg",
+        "#171717": "list_bg",
+    }
+    light_tokens = {
+        "#ffffff": "panel_bg",
+        "#f5f7fa": "list_bg",
+        "#eef2f6": "button_bg",
+        "#e4e9f0": "button_hover",
+    }
+    token = (dark_tokens if theme_is_dark() else light_tokens).get(normalized)
+    if token:
+        color_value = theme_colors("main").get(token, color_value)
+    color = QColor(color_value)
+    if not color.isValid():
+        return color_value
+    alpha = color.alphaF() * _ELEMENT_BACKGROUND_OPACITY
+    return f"rgba({color.red()}, {color.green()}, {color.blue()}, {alpha:.2f})"
+
+
+def color_from_style(color_value: str) -> QColor:
+    if color_value.startswith("rgba(") and color_value.endswith(")"):
+        try:
+            parts = [part.strip() for part in color_value[5:-1].split(",")]
+            color = QColor(int(parts[0]), int(parts[1]), int(parts[2]))
+            color.setAlphaF(float(parts[3]))
+            return color
+        except (IndexError, TypeError, ValueError):
+            pass
+    return QColor(color_value)
 
 
 def build_center_cropped_pixmap(pixmap: QPixmap, size: QSize) -> QPixmap:
@@ -65,6 +120,235 @@ def build_rounded_pixmap(pixmap: QPixmap, size: QSize, radius: int) -> QPixmap:
     return rounded
 
 
+class SeekProgressBar(QProgressBar):
+    seek_requested = pyqtSignal(float)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.is_dragging = False
+        self.hover_position: float | None = None
+        self.pointer_inside = False
+        self.setMouseTracking(True)
+
+    def enterEvent(self, event) -> None:
+        self.pointer_inside = True
+        super().enterEvent(event)
+
+    def preview_position(self, x_position: float) -> float:
+        usable_width = max(1, self.width())
+        fraction = max(0.0, min(1.0, float(x_position) / usable_width))
+        self.setValue(round(self.minimum() + fraction * (self.maximum() - self.minimum())))
+        self.hover_position = max(0.0, min(float(self.width()), float(x_position)))
+        self.update()
+        return fraction
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.is_dragging = True
+            self.preview_position(event.position().x())
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        self.pointer_inside = self.rect().contains(event.position().toPoint())
+        self.hover_position = max(
+            0.0, min(float(self.width()), event.position().x())
+        )
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            self.preview_position(event.position().x())
+            event.accept()
+            return
+        self.update()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self.is_dragging:
+            fraction = self.preview_position(event.position().x())
+            self.is_dragging = False
+            self.seek_requested.emit(fraction)
+            if not self.pointer_inside:
+                self.hover_position = None
+                self.update()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self.pointer_inside = False
+        if not self.is_dragging:
+            self.hover_position = None
+            self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if self.hover_position is None:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        marker_color = (
+            "#e7ebf1"
+            if theme_is_dark()
+            else theme_colors("main")["checkbox_checked"]
+        )
+        painter.setBrush(QColor(marker_color))
+        painter.drawEllipse(
+            QPointF(self.hover_position, self.height() / 2.0), 3.5, 3.5
+        )
+        painter.end()
+
+
+class RotatingDiscWidget(QWidget):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.cover_pixmap = QPixmap()
+        self.previous_cover_pixmap = QPixmap()
+        self.cover_initialized = False
+        self.rotation_angle = 0.0
+        self.transition_progress = 1.0
+        self.transition_direction = 1
+        self.is_playing = False
+        self.dark_theme = True
+        self.setFixedHeight(220)
+        self.rotation_timer = QTimer(self)
+        self.rotation_timer.setInterval(35)
+        self.rotation_timer.timeout.connect(self.advance_rotation)
+        self.transition_timer = QTimer(self)
+        self.transition_timer.setInterval(16)
+        self.transition_timer.timeout.connect(self.advance_transition)
+
+    def set_cover_data(
+        self, thumbnail_data: bytes | None, direction: int = 1
+    ) -> None:
+        next_pixmap = QPixmap()
+        if thumbnail_data:
+            next_pixmap.loadFromData(thumbnail_data)
+        self.previous_cover_pixmap = self.cover_pixmap
+        self.cover_pixmap = next_pixmap
+        self.rotation_angle = 0.0
+        if self.cover_initialized:
+            self.transition_direction = -1 if direction >= 0 else 1
+            self.transition_progress = 0.0
+            self.transition_timer.start()
+        else:
+            self.transition_progress = 1.0
+        self.cover_initialized = True
+        self.update()
+
+    def set_playing(self, playing: bool) -> None:
+        if self.is_playing == playing:
+            return
+        self.is_playing = playing
+        if playing:
+            self.rotation_timer.start()
+        else:
+            self.rotation_timer.stop()
+        self.update()
+
+    def set_dark_theme(self, is_dark: bool) -> None:
+        self.dark_theme = is_dark
+        self.update()
+
+    def advance_rotation(self) -> None:
+        self.rotation_angle = (self.rotation_angle + 0.8) % 360.0
+        self.update()
+
+    def advance_transition(self) -> None:
+        self.transition_progress = min(1.0, self.transition_progress + 0.065)
+        if self.transition_progress >= 1.0:
+            self.transition_timer.stop()
+            self.previous_cover_pixmap = QPixmap()
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        diameter = max(1.0, float(min(self.width(), self.height()) - 10))
+        disc_rect = QRectF(
+            (self.width() - diameter) / 2.0,
+            (self.height() - diameter) / 2.0,
+            diameter,
+            diameter,
+        )
+        if self.transition_progress < 1.0:
+            distance = float(self.width())
+            old_offset = self.transition_direction * self.transition_progress * distance
+            new_offset = self.transition_direction * (self.transition_progress - 1.0) * distance
+            self.paint_disc(
+                painter, disc_rect.translated(old_offset, 0.0),
+                self.previous_cover_pixmap, 0.0
+            )
+            self.paint_disc(
+                painter, disc_rect.translated(new_offset, 0.0),
+                self.cover_pixmap, self.rotation_angle
+            )
+        else:
+            self.paint_disc(painter, disc_rect, self.cover_pixmap, self.rotation_angle)
+        painter.end()
+
+    def paint_disc(
+        self,
+        painter: QPainter,
+        disc_rect: QRectF,
+        cover_pixmap: QPixmap,
+        rotation_angle: float,
+    ) -> None:
+        diameter = disc_rect.width()
+        disc_path = QPainterPath()
+        disc_path.addEllipse(disc_rect)
+        painter.save()
+        painter.setClipPath(disc_path)
+        if cover_pixmap.isNull():
+            painter.fillPath(
+                disc_path, QColor("#2c3036" if self.dark_theme else "#dfe4eb")
+            )
+        else:
+            square_size = QSize(round(diameter), round(diameter))
+            cropped = build_center_cropped_pixmap(cover_pixmap, square_size)
+            center = disc_rect.center()
+            painter.translate(center)
+            painter.rotate(rotation_angle)
+            painter.translate(-center)
+            painter.drawPixmap(disc_rect.toRect(), cropped)
+        painter.restore()
+        painter.setPen(QPen(QColor(255, 255, 255, 52), 1.0))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(disc_rect)
+        hub_diameter = max(42.0, diameter * 0.23)
+        hub_rect = QRectF(
+            disc_rect.center().x() - hub_diameter / 2.0,
+            disc_rect.center().y() - hub_diameter / 2.0,
+            hub_diameter,
+            hub_diameter,
+        )
+        silver = QConicalGradient(disc_rect.center(), -25.0)
+        silver.setColorAt(0.00, QColor("#6f747a"))
+        silver.setColorAt(0.12, QColor("#f4f6f8"))
+        silver.setColorAt(0.26, QColor("#9da2a8"))
+        silver.setColorAt(0.42, QColor("#ffffff"))
+        silver.setColorAt(0.58, QColor("#777c82"))
+        silver.setColorAt(0.74, QColor("#e5e8eb"))
+        silver.setColorAt(0.88, QColor("#979ca2"))
+        silver.setColorAt(1.00, QColor("#6f747a"))
+        painter.setPen(QPen(QColor(255, 255, 255, 120), 1.0))
+        painter.setBrush(silver)
+        painter.drawEllipse(hub_rect)
+        hole_diameter = max(16.0, diameter * 0.085)
+        hole_rect = QRectF(
+            disc_rect.center().x() - hole_diameter / 2.0,
+            disc_rect.center().y() - hole_diameter / 2.0,
+            hole_diameter,
+            hole_diameter,
+        )
+        painter.setPen(QPen(QColor(35, 38, 43, 190), 1.0))
+        painter.setBrush(QColor("#17191d" if self.dark_theme else "#f4f6f9"))
+        painter.drawEllipse(hole_rect)
+
+
 class ToggleSwitch(QCheckBox):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -92,7 +376,7 @@ class ToggleSwitch(QCheckBox):
         track_rect = self.rect().adjusted(1, 3, -1, -3)
         radius = track_rect.height() / 2
         if self.dark_theme:
-            track_color = QColor("#5f9ee6") if self.isChecked() else QColor("#454b55")
+            track_color = QColor("#9c9c9c") if self.isChecked() else QColor("#505050")
             knob_color = QColor("#f2f5fa")
         else:
             track_color = QColor("#4e88d9") if self.isChecked() else QColor("#b8c0cc")
@@ -112,6 +396,76 @@ class ToggleSwitch(QCheckBox):
         painter.setBrush(knob_color)
         painter.drawEllipse(knob_x, knob_y, knob_diameter, knob_diameter)
         painter.end()
+
+
+class DialogTitleBar(QWidget):
+    def __init__(self, dialog: QWidget, is_dark: bool = True) -> None:
+        super().__init__(dialog)
+        self.dialog = dialog
+        self.drag_offset = None
+        self.setObjectName("compact_dialog_titlebar")
+        self.setFixedHeight(34)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 0, 10, 0)
+        layout.setSpacing(8)
+        self.close_button = QToolButton()
+        self.minimize_button = QToolButton()
+        self.zoom_button = QToolButton()
+        for button, color in (
+            (self.close_button, "#ff5f57"),
+            (self.minimize_button, "#febc2e"),
+            (self.zoom_button, "#28c840"),
+        ):
+            button.setFixedSize(13, 13)
+            button.setStyleSheet(
+                f"QToolButton {{ background:{color}; border:none; border-radius:6px; }}"
+                "QToolButton:hover { border:1px solid rgba(0,0,0,0.28); }"
+            )
+            layout.addWidget(button)
+        self.title_label = QLabel(dialog.windowTitle())
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.title_label, 1)
+        self.right_spacer = QWidget()
+        self.right_spacer.setFixedWidth(55)
+        layout.addWidget(self.right_spacer)
+        self.close_button.clicked.connect(dialog.close)
+        self.minimize_button.clicked.connect(dialog.showMinimized)
+        self.zoom_button.clicked.connect(self.toggle_zoom)
+        self.apply_theme(is_dark)
+
+    def apply_theme(self, is_dark: bool) -> None:
+        background = element_background("#242424" if is_dark else "#f2f3f5")
+        text = "#eeeeee" if is_dark else "#242424"
+        border = "#404040" if is_dark else "#d0d4da"
+        self.setStyleSheet(
+            f"QWidget#compact_dialog_titlebar {{ background:{background}; border:none; border-bottom:1px solid {border}; }}"
+        )
+        self.title_label.setStyleSheet(
+            f"color:{text}; background:transparent; border:none; font-size:12px; font-weight:700;"
+        )
+
+    def sync_title(self) -> None:
+        self.title_label.setText(self.dialog.windowTitle())
+
+    def toggle_zoom(self) -> None:
+        if self.dialog.isMaximized():
+            self.dialog.showNormal()
+        else:
+            self.dialog.showMaximized()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drag_offset = event.globalPosition().toPoint() - self.dialog.pos()
+            event.accept()
+
+    def mouseMoveEvent(self, event) -> None:
+        if self.drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            self.dialog.move(event.globalPosition().toPoint() - self.drag_offset)
+            event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        self.drag_offset = None
+        super().mouseReleaseEvent(event)
 
 
 class BackChevronButton(QToolButton):
@@ -300,10 +654,10 @@ class PlaylistListItemWidget(QFrame):
 
     def update_style(self) -> None:
         if self.dark_theme:
-            background = "#355680" if self.is_selected else "#252a31"
-            border = "#4b74a7" if self.is_selected else "#30353d"
+            background = element_background("#565656" if self.is_selected else "#292929")
+            border = "#747474" if self.is_selected else "#3b3b3b"
         else:
-            background = "#d9e8fb" if self.is_selected else "#ffffff"
+            background = element_background("#d9e8fb" if self.is_selected else "#ffffff")
             border = "#6e99d8" if self.is_selected else "#d0d7e2"
         self.setStyleSheet(
             f"#playlist_item {{ background:{background}; border:1px solid {border}; border-radius:8px; }}"
@@ -346,6 +700,8 @@ class PlaylistListItemWidget(QFrame):
 class SearchAlbumCard(QFrame):
     clicked = pyqtSignal(str, str)
     delete_requested = pyqtSignal(str, str)
+    playback_requested = pyqtSignal(str, str)
+    context_requested = pyqtSignal(str, str, object)
 
     def __init__(
         self,
@@ -389,6 +745,19 @@ class SearchAlbumCard(QFrame):
         self.delete_button.clicked.connect(
             lambda: self.delete_requested.emit(self.album_name, self.author_name)
         )
+        self.playback_button = QToolButton(self)
+        self.playback_button.setToolTip("Воспроизвести альбом")
+        self.playback_button.setFixedSize(34, 34)
+        self.playback_button.setIconSize(QSize(22, 22))
+        self.playback_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.playback_button.clicked.connect(
+            lambda: self.playback_requested.emit(
+                self.album_name, self.author_name
+            )
+        )
+        self.play_icon = QIcon()
+        self.pause_icon = QIcon()
+        self.is_collection_playing = False
 
         self.apply_theme(True)
         self.refresh_cover()
@@ -413,13 +782,13 @@ class SearchAlbumCard(QFrame):
 
     def apply_theme(self, is_dark: bool) -> None:
         self.dark_theme = is_dark
-        background = "#303030" if is_dark else "#ffffff"
-        border = "#3a3f48" if is_dark else "#d0d7e2"
-        preview_bg = "#20242a" if is_dark else "#eef2f6"
-        preview_fg = "#8f98a6" if is_dark else "#788292"
+        background = element_background("#303030" if is_dark else "#ffffff")
+        border = "#484848" if is_dark else "#d0d7e2"
+        preview_bg = element_background("#242424" if is_dark else "#eef2f6")
+        preview_fg = "#989898" if is_dark else "#788292"
         primary = "#eef2f7" if is_dark else "#1e2630"
-        secondary = "#b4bcc9" if is_dark else "#556170"
-        tertiary = "#8f98a6" if is_dark else "#788292"
+        secondary = "#bcbcbc" if is_dark else "#556170"
+        tertiary = "#989898" if is_dark else "#788292"
         self.setStyleSheet(
             f"#search_album_card {{ background:{background}; border:1px solid {border}; border-radius:10px; }}"
         )
@@ -436,6 +805,34 @@ class SearchAlbumCard(QFrame):
             f"font-size:12px; color:{tertiary}; background:transparent; border:none;"
         )
         self.apply_delete_button_style()
+        self.apply_playback_button_style()
+
+    def set_playback_icons(self, play_icon: QIcon, pause_icon: QIcon) -> None:
+        self.play_icon = play_icon
+        self.pause_icon = pause_icon
+        self.playback_button.setIcon(
+            self.pause_icon if self.is_collection_playing else self.play_icon
+        )
+
+    def set_playback_state(self, is_active: bool, is_playing: bool) -> None:
+        self.is_collection_playing = bool(is_active and is_playing)
+        self.playback_button.setIcon(
+            self.pause_icon if self.is_collection_playing else self.play_icon
+        )
+        self.playback_button.setToolTip(
+            "Пауза" if self.is_collection_playing else "Воспроизвести альбом"
+        )
+
+    def set_playback_available(self, available: bool) -> None:
+        self.playback_button.setEnabled(available)
+        self.playback_button.setVisible(available)
+
+    def apply_playback_button_style(self) -> None:
+        hover = "rgba(30, 30, 30, 0.82)" if self.dark_theme else "rgba(255, 255, 255, 0.88)"
+        self.playback_button.setStyleSheet(
+            "QToolButton { background:transparent; border:none; border-radius:17px; padding:6px; }"
+            f"QToolButton:hover {{ background:{hover}; }}"
+        )
 
     def create_delete_button(self, tooltip: str) -> QToolButton:
         button = QToolButton(self)
@@ -464,10 +861,21 @@ class SearchAlbumCard(QFrame):
 
     def position_delete_button(self) -> None:
         self.delete_button.move(self.width() - self.delete_button.width() - 10, 8)
+        self.playback_button.move(
+            self.width() - self.playback_button.width() - 8,
+            self.height() - self.playback_button.height() - 8,
+        )
+        self.playback_button.raise_()
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self.album_name, self.author_name)
+        elif event.button() == Qt.MouseButton.RightButton:
+            self.context_requested.emit(
+                self.album_name,
+                self.author_name,
+                event.globalPosition().toPoint(),
+            )
         super().mousePressEvent(event)
 
     def resizeEvent(self, event) -> None:
@@ -520,11 +928,11 @@ class SearchAuthorCard(QFrame):
 
     def apply_theme(self, is_dark: bool) -> None:
         self.dark_theme = is_dark
-        background = "#303030" if is_dark else "#ffffff"
-        border = "#3a3f48" if is_dark else "#d0d7e2"
-        name_bg = "#20242a" if is_dark else "#eef2f6"
+        background = element_background("#303030" if is_dark else "#ffffff")
+        border = "#484848" if is_dark else "#d0d7e2"
+        name_bg = element_background("#242424" if is_dark else "#eef2f6")
         primary = "#eef2f7" if is_dark else "#1e2630"
-        secondary = "#b4bcc9" if is_dark else "#556170"
+        secondary = "#bcbcbc" if is_dark else "#556170"
         self.setStyleSheet(
             f"#search_author_card {{ background:{background}; border:1px solid {border}; border-radius:10px; }}"
         )
@@ -621,10 +1029,10 @@ class HomeAuthorCard(QFrame):
 
     def apply_theme(self, is_dark: bool) -> None:
         self.dark_theme = is_dark
-        background = "#303030" if is_dark else "#ffffff"
-        border = "#3a3f48" if is_dark else "#d0d7e2"
+        background = element_background("#303030" if is_dark else "#ffffff")
+        border = "#484848" if is_dark else "#d0d7e2"
         primary = "#eef2f7" if is_dark else "#1e2630"
-        secondary = "#b4bcc9" if is_dark else "#556170"
+        secondary = "#bcbcbc" if is_dark else "#556170"
         self.setStyleSheet(
             f"#home_author_card {{ background:{background}; border:1px solid {border}; border-radius:10px; }}"
         )
@@ -680,6 +1088,8 @@ class HomeAuthorCard(QFrame):
 class SearchPlaylistCard(QFrame):
     clicked = pyqtSignal(int)
     delete_requested = pyqtSignal(int)
+    playback_requested = pyqtSignal(int)
+    context_requested = pyqtSignal(int, object)
 
     def __init__(
         self,
@@ -724,6 +1134,17 @@ class SearchPlaylistCard(QFrame):
         self.delete_button.clicked.connect(
             lambda: self.delete_requested.emit(self.playlist_index)
         )
+        self.playback_button = QToolButton(self)
+        self.playback_button.setToolTip("Воспроизвести плейлист")
+        self.playback_button.setFixedSize(34, 34)
+        self.playback_button.setIconSize(QSize(22, 22))
+        self.playback_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.playback_button.clicked.connect(
+            lambda: self.playback_requested.emit(self.playlist_index)
+        )
+        self.play_icon = QIcon()
+        self.pause_icon = QIcon()
+        self.is_collection_playing = False
 
         self.apply_theme(True)
         self.refresh_cover()
@@ -769,13 +1190,13 @@ class SearchPlaylistCard(QFrame):
 
     def apply_theme(self, is_dark: bool) -> None:
         self.dark_theme = is_dark
-        background = "#303030" if is_dark else "#ffffff"
-        border = "#3a3f48" if is_dark else "#d0d7e2"
-        preview_bg = "#20242a" if is_dark else "#eef2f6"
-        preview_fg = "#8f98a6" if is_dark else "#788292"
+        background = element_background("#303030" if is_dark else "#ffffff")
+        border = "#484848" if is_dark else "#d0d7e2"
+        preview_bg = element_background("#242424" if is_dark else "#eef2f6")
+        preview_fg = "#989898" if is_dark else "#788292"
         primary = "#eef2f7" if is_dark else "#1e2630"
-        secondary = "#b4bcc9" if is_dark else "#556170"
-        tertiary = "#8f98a6" if is_dark else "#788292"
+        secondary = "#bcbcbc" if is_dark else "#556170"
+        tertiary = "#989898" if is_dark else "#788292"
         self.setStyleSheet(
             f"#search_playlist_card {{ background:{background}; border:1px solid {border}; border-radius:10px; }}"
         )
@@ -792,6 +1213,34 @@ class SearchPlaylistCard(QFrame):
             f"font-size:12px; color:{tertiary}; background:transparent; border:none;"
         )
         self.apply_delete_button_style()
+        self.apply_playback_button_style()
+
+    def set_playback_icons(self, play_icon: QIcon, pause_icon: QIcon) -> None:
+        self.play_icon = play_icon
+        self.pause_icon = pause_icon
+        self.playback_button.setIcon(
+            self.pause_icon if self.is_collection_playing else self.play_icon
+        )
+
+    def set_playback_state(self, is_active: bool, is_playing: bool) -> None:
+        self.is_collection_playing = bool(is_active and is_playing)
+        self.playback_button.setIcon(
+            self.pause_icon if self.is_collection_playing else self.play_icon
+        )
+        self.playback_button.setToolTip(
+            "Пауза" if self.is_collection_playing else "Воспроизвести плейлист"
+        )
+
+    def set_playback_available(self, available: bool) -> None:
+        self.playback_button.setEnabled(available)
+        self.playback_button.setVisible(available)
+
+    def apply_playback_button_style(self) -> None:
+        hover = "rgba(30, 30, 30, 0.82)" if self.dark_theme else "rgba(255, 255, 255, 0.88)"
+        self.playback_button.setStyleSheet(
+            "QToolButton { background:transparent; border:none; border-radius:17px; padding:6px; }"
+            f"QToolButton:hover {{ background:{hover}; }}"
+        )
 
     def create_delete_button(self, tooltip: str) -> QToolButton:
         button = QToolButton(self)
@@ -820,10 +1269,19 @@ class SearchPlaylistCard(QFrame):
 
     def position_delete_button(self) -> None:
         self.delete_button.move(self.width() - self.delete_button.width() - 10, 8)
+        self.playback_button.move(
+            self.width() - self.playback_button.width() - 8,
+            self.height() - self.playback_button.height() - 8,
+        )
+        self.playback_button.raise_()
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self.playlist_index)
+        elif event.button() == Qt.MouseButton.RightButton:
+            self.context_requested.emit(
+                self.playlist_index, event.globalPosition().toPoint()
+            )
         super().mousePressEvent(event)
 
     def resizeEvent(self, event) -> None:
@@ -837,6 +1295,8 @@ class RemoteTrackCard(QFrame):
     reveal_requested = pyqtSignal(int)
     delete_requested = pyqtSignal(int)
     status_requested = pyqtSignal(int)
+    playback_requested = pyqtSignal(int)
+    playback_seek_requested = pyqtSignal(int, float)
 
     def __init__(
         self,
@@ -858,6 +1318,14 @@ class RemoteTrackCard(QFrame):
         self.status_icons = status_icons
         self.reveal_icon = reveal_icon or QIcon()
         self.current_status = STATUS_PENDING
+        self.is_playing = False
+        self.is_current_playback = False
+        self.playback_progress = 0.0
+        self.play_icon = QIcon()
+        self.pause_icon = QIcon()
+        self.playback_button_hovered = False
+        self.playback_seek_dragging = False
+        self.playback_hover_position: float | None = None
         self.status_rotation_angle = 0
         self.dark_theme = True
         self.show_preview = show_preview
@@ -865,6 +1333,7 @@ class RemoteTrackCard(QFrame):
         self.compact = compact
         self.preview_size = preview_size
         self.setObjectName("remote_track_card")
+        self.setMouseTracking(True)
         self.setFixedHeight(68 if compact else 126)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
@@ -949,6 +1418,27 @@ class RemoteTrackCard(QFrame):
         self.progress_bar.setFixedHeight(10 if compact else 14)
         self.progress_bar.setVisible(False)
         root_layout.addWidget(self.progress_bar)
+
+        self.playback_progress_bar = QProgressBar(self)
+        self.playback_progress_bar.setRange(0, 1000)
+        self.playback_progress_bar.setValue(0)
+        self.playback_progress_bar.setTextVisible(False)
+        self.playback_progress_bar.setFixedHeight(3)
+        self.playback_progress_bar.hide()
+        self.playback_progress_bar.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents
+        )
+
+        self.playback_button = QToolButton(self)
+        self.playback_button.setToolTip("Воспроизвести")
+        self.playback_button.setAccessibleName("Воспроизвести трек")
+        self.playback_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.playback_button.setFixedSize(42, 42)
+        self.playback_button.setIconSize(QSize(28, 28))
+        self.playback_button.installEventFilter(self)
+        self.playback_button.clicked.connect(
+            lambda: self.playback_requested.emit(self.track_index)
+        )
 
         self.reveal_button = QToolButton()
         self.reveal_button.setToolTip("Открыть расположение")
@@ -1043,12 +1533,12 @@ class RemoteTrackCard(QFrame):
     def apply_theme(self, is_dark: bool) -> None:
         self.dark_theme = is_dark
         primary = "#eef2f7" if is_dark else "#1e2630"
-        secondary = "#b4bcc9" if is_dark else "#556170"
-        tertiary = "#8f98a6" if is_dark else "#788292"
-        preview_bg = "#303236" if is_dark else "#e5eaf0"
+        secondary = "#bcbcbc" if is_dark else "#556170"
+        tertiary = "#989898" if is_dark else "#788292"
+        preview_bg = element_background("#303236" if is_dark else "#e5eaf0")
         preview_fg = "#aeb4bf" if is_dark else "#6d7785"
         progress_bg = "#1f232a" if is_dark else "#eef2f6"
-        progress_border = "#3a404a" if is_dark else "#d0d7e2"
+        progress_border = "#484848" if is_dark else "#d0d7e2"
         progress_text = "#eef2f7" if is_dark else "#1e2630"
         self.position_label.setStyleSheet(
             f"font-size:13px; font-weight:700; color:{tertiary}; background:transparent; border:none;"
@@ -1094,18 +1584,86 @@ class RemoteTrackCard(QFrame):
             "padding:0;"
             "}"
             "QProgressBar::chunk {"
-            "background:#5f9ee6;"
+            f"background:{'#9c9c9c' if is_dark else '#5f9ee6'};"
             f"border-radius:{4 if self.compact else 6}px;"
             "}"
         )
+        self.playback_button.setStyleSheet(
+            "QToolButton { background:transparent; border:none; padding:7px; }"
+            "QToolButton:hover { background:transparent; border:none; }"
+            "QToolButton:pressed { background:transparent; border:none; }"
+            "QToolButton:disabled { background:transparent; border:none; }"
+        )
+        self.playback_progress_bar.setStyleSheet(
+            "QProgressBar { background:transparent; border:none; border-radius:2px; }"
+            f"QProgressBar::chunk {{ background:{'#ffffff' if is_dark else theme_colors('main')['checkbox_checked']}; border:none; border-radius:2px; }}"
+        )
         self.update_card_style()
+
+    def set_playback_icons(self, play_icon: QIcon, pause_icon: QIcon) -> None:
+        self.play_icon = play_icon
+        self.pause_icon = pause_icon
+        self.update_playback_state(self.is_playing, self.playback_progress)
+
+    def set_playback_available(self, available: bool) -> None:
+        self.playback_button.setEnabled(available)
+        self.playback_button.setToolTip(
+            "Воспроизвести" if available else "Сначала загрузите трек"
+        )
+
+    def update_playback_state(
+        self,
+        is_playing: bool,
+        progress: float,
+        is_current: bool | None = None,
+    ) -> None:
+        self.is_playing = is_playing
+        if is_current is not None:
+            self.is_current_playback = is_current
+        if not self.is_current_playback:
+            self.playback_seek_dragging = False
+            self.playback_hover_position = None
+        if not self.playback_seek_dragging:
+            self.playback_progress = max(0.0, min(1.0, progress))
+        self.playback_progress_bar.setValue(int(self.playback_progress * 1000))
+        self.update()
+        self.update_playback_button_icon()
+        self.playback_button.setToolTip("Пауза" if is_playing else "Воспроизвести")
+        self.playback_button.setAccessibleName(
+            "Приостановить трек" if is_playing else "Воспроизвести трек"
+        )
+
+    def update_playback_button_icon(self) -> None:
+        source_icon = self.pause_icon if self.is_playing else self.play_icon
+        if source_icon.isNull():
+            self.playback_button.setIcon(QIcon())
+            return
+        source_pixmap = source_icon.pixmap(self.playback_button.iconSize())
+        faded_pixmap = QPixmap(source_pixmap.size())
+        faded_pixmap.setDevicePixelRatio(source_pixmap.devicePixelRatio())
+        faded_pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(faded_pixmap)
+        painter.setOpacity(1.0 if self.playback_button_hovered else 0.42)
+        painter.drawPixmap(0, 0, source_pixmap)
+        painter.end()
+        self.playback_button.setIcon(QIcon(faded_pixmap))
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched is self.playback_button:
+            if event.type() == QEvent.Type.Enter:
+                self.playback_button_hovered = True
+                self.update_playback_button_icon()
+            elif event.type() == QEvent.Type.Leave:
+                self.playback_button_hovered = False
+                self.update_playback_button_icon()
+        return super().eventFilter(watched, event)
 
     def update_card_style(self) -> None:
         if self.dark_theme:
-            background = "#303030"
+            background = element_background("#303030")
             border_color = "#606060" if self.is_selected else "#3a3f48"
         else:
-            background = "#ffffff"
+            background = element_background("#ffffff")
             border_color = "#6e99d8" if self.is_selected else "#d0d7e2"
         self.setStyleSheet(
             f"#remote_track_card {{ background:{background}; border:1px solid {border_color}; border-radius:10px; }}"
@@ -1157,6 +1715,15 @@ class RemoteTrackCard(QFrame):
             self.update_status_icon(self.current_status)
 
     def mousePressEvent(self, event) -> None:
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.is_current_playback
+            and event.position().y() >= self.height() - 10
+        ):
+            self.playback_seek_dragging = True
+            self.preview_playback_seek(event.position().x())
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self.selected.emit(self.track_index, int(event.modifiers().value))
         elif event.button() == Qt.MouseButton.RightButton:
@@ -1165,9 +1732,99 @@ class RemoteTrackCard(QFrame):
             )
         super().mousePressEvent(event)
 
+    def mouseMoveEvent(self, event) -> None:
+        if (
+            event.buttons() & Qt.MouseButton.LeftButton
+            and self.playback_seek_dragging
+        ):
+            self.preview_playback_seek(event.position().x())
+            event.accept()
+            return
+        if self.is_current_playback and event.position().y() >= self.height() - 12:
+            self.playback_hover_position = max(
+                1.0, min(float(self.width() - 1), event.position().x())
+            )
+        else:
+            self.playback_hover_position = None
+        self.update()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self.playback_seek_dragging:
+            fraction = self.preview_playback_seek(event.position().x())
+            self.playback_seek_dragging = False
+            self.playback_seek_requested.emit(self.track_index, fraction)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        if not self.playback_seek_dragging:
+            self.playback_hover_position = None
+            self.update()
+        super().leaveEvent(event)
+
+    def preview_playback_seek(self, x_position: float) -> float:
+        fraction = max(0.0, min(1.0, (float(x_position) - 1.0) / max(1, self.width() - 2)))
+        self.playback_progress = fraction
+        self.playback_hover_position = max(
+            1.0, min(float(self.width() - 1), float(x_position))
+        )
+        self.update()
+        return fraction
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self.position_overlay_controls()
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if not self.is_current_playback:
+            return
+        if self.playback_progress <= 0.0 and self.playback_hover_position is None:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        card_shape = QPainterPath()
+        card_shape.addRoundedRect(
+            1.0,
+            1.0,
+            max(0.0, float(self.width() - 2)),
+            max(0.0, float(self.height() - 2)),
+            9.0,
+            9.0,
+        )
+        painter.setClipPath(card_shape)
+        playback_accent = (
+            "#ffffff"
+            if self.dark_theme
+            else theme_colors("main")["checkbox_checked"]
+        )
+        if self.playback_progress > 0.0:
+            progress_width = max(
+                0.0, float(self.width() - 2) * self.playback_progress
+            )
+            painter.fillRect(
+                QRectF(
+                    1.0,
+                    float(self.height() - 4),
+                    progress_width,
+                    3.0,
+                ),
+                QColor(playback_accent),
+            )
+        if self.playback_hover_position is not None:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(playback_accent))
+            painter.drawEllipse(
+                QPointF(
+                    self.playback_hover_position,
+                    float(self.height() - 5),
+                ),
+                4.0,
+                4.0,
+            )
+        painter.end()
 
     def position_overlay_controls(self) -> None:
         delete_x = self.width() - self.delete_button.width() - 12
@@ -1182,11 +1839,147 @@ class RemoteTrackCard(QFrame):
         self.reveal_button.move(reveal_x, reveal_y)
         delete_y = (self.height() - self.delete_button.height()) // 2
         self.delete_button.move(delete_x, delete_y)
+        self.playback_button.move(
+            (self.width() - self.playback_button.width()) // 2,
+            min(
+                self.height() - self.playback_button.height() - 8,
+                (self.height() - self.playback_button.height()) // 2
+                + (5 if self.compact else 18),
+            ),
+        )
+        self.playback_button.raise_()
 
     def rounded_preview_pixmap(self, pixmap: QPixmap) -> QPixmap:
         size = self.preview_label.size()
         radius = max(8, self.preview_size // 7)
         return build_rounded_pixmap(pixmap, size, radius)
+
+
+class PlaybackQueueTrackCard(QFrame):
+    activated = pyqtSignal(int)
+    delete_requested = pyqtSignal(int)
+
+    def __init__(
+        self,
+        queue_index: int,
+        title: str,
+        author: str,
+        thumbnail_data: bytes | None,
+        active: bool = False,
+        deletable: bool = True,
+        interactive: bool = True,
+    ) -> None:
+        super().__init__()
+        self.queue_index = queue_index
+        self.active = active
+        self.interactive = interactive
+        self.dark_theme = True
+        self.full_title = title or "Без названия"
+        self.setObjectName("playback_queue_track_card")
+        self.setCursor(
+            Qt.CursorShape.PointingHandCursor
+            if interactive
+            else Qt.CursorShape.ArrowCursor
+        )
+        self.setFixedHeight(58)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(7, 6, 7, 6)
+        layout.setSpacing(8)
+
+        self.cover_label = QLabel("♪")
+        self.cover_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.cover_label.setFixedSize(46, 46)
+        if thumbnail_data:
+            pixmap = QPixmap()
+            if pixmap.loadFromData(thumbnail_data):
+                self.cover_label.setPixmap(
+                    build_rounded_pixmap(pixmap, QSize(46, 46), 7)
+                )
+                self.cover_label.setText("")
+        layout.addWidget(self.cover_label)
+
+        text_layout = QVBoxLayout()
+        text_layout.setContentsMargins(0, 2, 0, 2)
+        text_layout.setSpacing(2)
+        self.title_label = QLabel(self.full_title)
+        self.title_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.title_label.setMinimumWidth(0)
+        self.title_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        self.author_label = QLabel(author or "Неизвестный автор")
+        self.author_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.author_label.setMinimumWidth(0)
+        self.author_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        text_layout.addWidget(self.title_label)
+        text_layout.addWidget(self.author_label)
+        layout.addLayout(text_layout, 1)
+
+        self.delete_button = QToolButton()
+        self.delete_button.setText("●")
+        self.delete_button.setToolTip("Удалить из очереди")
+        self.delete_button.setFixedSize(24, 24)
+        self.delete_button.clicked.connect(
+            lambda: self.delete_requested.emit(self.queue_index)
+        )
+        layout.addWidget(self.delete_button)
+        self.delete_button.setVisible(deletable)
+        self.apply_theme(True)
+        QTimer.singleShot(0, self.update_elided_title)
+
+    def update_elided_title(self) -> None:
+        available_width = max(0, self.title_label.width())
+        self.title_label.setText(
+            self.title_label.fontMetrics().elidedText(
+                self.full_title,
+                Qt.TextElideMode.ElideRight,
+                available_width,
+            )
+        )
+        self.title_label.setToolTip(
+            self.full_title if self.title_label.text() != self.full_title else ""
+        )
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self.update_elided_title)
+
+    def apply_theme(self, is_dark: bool) -> None:
+        self.dark_theme = is_dark
+        background = element_background("#35383d" if is_dark else "#ffffff")
+        active_background = element_background("#505050" if is_dark else "#e8eef7")
+        border = "#8a8a8a" if self.active else ("#565656" if is_dark else "#d0d7e2")
+        primary = "#eef2f7" if is_dark else "#1e2630"
+        secondary = "#aeb6c2" if is_dark else "#667181"
+        self.setStyleSheet(
+            f"QFrame#playback_queue_track_card {{ background:{active_background if self.active else background}; border:1px solid {border}; border-radius:9px; }}"
+        )
+        self.cover_label.setStyleSheet(
+            f"background:{'#292c31' if is_dark else '#e7ebf0'}; color:{secondary}; border:none; border-radius:7px;"
+        )
+        self.title_label.setStyleSheet(
+            f"color:{primary}; font-size:12px; font-weight:700; background:transparent; border:none;"
+        )
+        self.author_label.setStyleSheet(
+            f"color:{secondary}; font-size:11px; background:transparent; border:none;"
+        )
+        self.delete_button.setStyleSheet(
+            "QToolButton { background:rgba(255,77,90,0.12); color:#ff4d5a; border:none; border-radius:12px; font-size:14px; padding:0; }"
+            "QToolButton:hover { background:rgba(255,77,90,0.24); color:#ff6570; }"
+        )
+
+    def mousePressEvent(self, event) -> None:
+        if self.interactive and event.button() == Qt.MouseButton.LeftButton:
+            self.activated.emit(self.queue_index)
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
 
 class HoverCoverLabel(QLabel):
@@ -1228,13 +2021,14 @@ class HoverCoverLabel(QLabel):
         border: str,
         text: str,
     ) -> None:
-        del is_dark
-        self.background_color = QColor(background)
+        self.background_color = color_from_style(background)
         self.border_color = QColor(border)
         self.text_color = QColor(text)
-        button_bg = "#2e3136" if QColor(background).lightness() < 128 else "#eef2f6"
-        button_hover = "#373b43" if QColor(background).lightness() < 128 else "#e4e9f0"
-        button_border = "#3b3f46" if QColor(background).lightness() < 128 else "#cad2de"
+        button_bg = element_background(
+            "#2e3136" if is_dark else "#eef2f6"
+        )
+        button_hover = "#373b43" if is_dark else "#e4e9f0"
+        button_border = "#3b3f46" if is_dark else "#cad2de"
         style = (
             "QToolButton {"
             f"background:{button_bg};"
@@ -1526,15 +2320,15 @@ class DownloadCard(QFrame):
     def apply_theme(self, is_dark: bool) -> None:
         self.dark_theme = is_dark
         primary = "#eef2f7" if is_dark else "#1e2630"
-        secondary = "#b4bcc9" if is_dark else "#556170"
+        secondary = "#bcbcbc" if is_dark else "#556170"
         tertiary = "#7f8794" if is_dark else "#788292"
-        preview_bg = "#303236" if is_dark else "#e5eaf0"
+        preview_bg = element_background("#303236" if is_dark else "#e5eaf0")
         preview_fg = "#aeb4bf" if is_dark else "#6d7785"
-        button_bg = "#32363d" if is_dark else "#eef2f6"
-        button_border = "#4a515c" if is_dark else "#c8d0dc"
+        button_bg = element_background("#32363d" if is_dark else "#eef2f6")
+        button_border = "#555555" if is_dark else "#c8d0dc"
         button_hover = "#3b414b" if is_dark else "#e3e8ef"
         progress_bg = "#1f232a" if is_dark else "#eef2f6"
-        progress_border = "#3a404a" if is_dark else "#d0d7e2"
+        progress_border = "#484848" if is_dark else "#d0d7e2"
         progress_text = "#eef2f7" if is_dark else "#1e2630"
         self.position_label.setStyleSheet(
             f"font-size:13px; font-weight:700; color:{tertiary}; background:transparent; border:none;"
@@ -1575,7 +2369,7 @@ class DownloadCard(QFrame):
             "font-weight:700;"
             "}"
             "QProgressBar::chunk {"
-            "background:#5f9ee6;"
+            f"background:{'#9c9c9c' if is_dark else '#5f9ee6'};"
             "border-radius:9px;"
             "}"
         )
@@ -1583,10 +2377,10 @@ class DownloadCard(QFrame):
 
     def update_card_style(self) -> None:
         if self.dark_theme:
-            background = "#2a2d33"
-            border_color = "#5f9ee6" if self.is_selected else "#3a3f48"
+            background = element_background("#292929")
+            border_color = "#9c9c9c" if self.is_selected else "#484848"
         else:
-            background = "#ffffff"
+            background = element_background("#ffffff")
             border_color = "#6e99d8" if self.is_selected else "#d0d7e2"
         self.setStyleSheet(
             f"#card {{ background:{background}; border:1px solid {border_color}; border-radius:8px; }}"
@@ -1792,13 +2586,13 @@ class DownloadQueueCard(QFrame):
 
     def apply_theme(self, is_dark: bool) -> None:
         self.dark_theme = is_dark
-        background = "#2a2d33" if is_dark else "#ffffff"
-        border = "#3a3f48" if is_dark else "#d0d7e2"
+        background = element_background("#292929" if is_dark else "#ffffff")
+        border = "#484848" if is_dark else "#d0d7e2"
         primary = "#eef2f7" if is_dark else "#1e2630"
-        preview_bg = "#303236" if is_dark else "#e5eaf0"
+        preview_bg = element_background("#303236" if is_dark else "#e5eaf0")
         preview_fg = "#aeb4bf" if is_dark else "#6d7785"
         progress_bg = "#1f232a" if is_dark else "#eef2f6"
-        progress_border = "#3a404a" if is_dark else "#d0d7e2"
+        progress_border = "#484848" if is_dark else "#d0d7e2"
         progress_text = "#eef2f7" if is_dark else "#1e2630"
         self.setStyleSheet(
             f"#download_queue_card {{ background:{background}; border:1px solid {border}; border-radius:10px; }}"
@@ -1820,7 +2614,7 @@ class DownloadQueueCard(QFrame):
             "font-weight:700;"
             "}"
             "QProgressBar::chunk {"
-            "background:#5f9ee6;"
+            f"background:{'#9c9c9c' if is_dark else '#5f9ee6'};"
             "border-radius:6px;"
             "}"
         )
@@ -1908,13 +2702,13 @@ class AddCard(QFrame):
             card_bg = "rgba(255, 255, 255, 0.02)"
             card_border = "#4a515c"
             text_color = "#b7bfcb"
-            plus_bg = "#262a31"
+            plus_bg = element_background("#262a31")
             plus_border = "#5a6270"
         else:
-            card_bg = "#f5f7fa"
+            card_bg = element_background("#f5f7fa")
             card_border = "#c8d0dc"
             text_color = "#667283"
-            plus_bg = "#ffffff"
+            plus_bg = element_background("#ffffff")
             plus_border = "#b7c1ce"
         self.setStyleSheet(
             "#add_card {"
