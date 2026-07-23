@@ -1,83 +1,125 @@
 # Compact
 
-Compact — настольный музыкальный проигрыватель и менеджер локальной медиатеки на PyQt6. Приложение объединяет импорт и загрузку музыки, просмотр библиотеки, управление очередью воспроизведения и редактирование метаданных в компактном трёхсекционном интерфейсе.
+Compact is a desktop music player and local library manager built with PyQt6.
+It combines music downloads and imports, library browsing, playback queue
+management, and MP3 metadata editing in a compact three-panel interface.
 
-Текущая версия: **0.8.0**.
+Current version: **0.8.2**
 
-## Возможности
+## Features
 
-### Медиатека
+### Music library
 
-- локальная библиотека с представлениями по авторам, альбомам и плейлистам;
-- домашняя страница с быстрым доступом к содержимому библиотеки;
-- поиск по трекам;
-- отдельные страницы авторов, альбомов и плейлистов;
-- ручные плейлисты и добавление в них одного или нескольких треков;
-- сортировка альбомов и плейлистов по нумерации треков;
-- контекстные действия, включая «Играть следующим»;
-- загрузка MP3 через `yt-dlp` и импорт ссылок из TXT-файлов;
-- работа с обложками и метаданными MP3 через `mutagen`.
+- Local library views for artists, albums, and playlists.
+- A home page with quick access to recent and grouped library content.
+- Track, artist, album, and playlist search.
+- Dedicated artist, album, and playlist pages.
+- Manual playlists with single-track and multi-track additions.
+- Track-number sorting for albums and playlists.
+- Context actions such as **Play next**.
+- MP3 downloads through `yt-dlp` and bulk link imports from TXT files.
+- MP3 artwork and metadata reading and editing.
+- Automatic cleanup of artist folders that no longer contain any tracks.
 
-### Воспроизведение
+### Playback
 
-- воспроизведение и пауза из карточки трека, альбома или плейлиста;
-- переход к предыдущему и следующему треку;
-- перемотка из карточки трека и общего прогресс-бара;
-- очередь воспроизведения с запуском, удалением и добавлением треков в начало хвоста;
-- история прослушивания с поддержкой повторяющихся записей;
-- случайное воспроизведение без повторений внутри текущей очереди;
-- повтор всей очереди или одного трека;
-- автоматический переход к следующему треку;
-- плавный cross-fade с настраиваемой длительностью;
-- опциональная нормализация громкости;
-- сохранение активного трека, позиции и очереди между запусками приложения.
+- Play and pause from track, album, and playlist cards.
+- Previous and next track navigation.
+- Seeking from track cards and the main progress bar.
+- Editable playback queue with play, remove, and **Play next** actions.
+- Playback history, including repeated entries.
+- Shuffle playback without repetitions inside the active queue.
+- Repeat queue and repeat-one modes.
+- Automatic transition to the next available track.
+- Configurable cross-fade.
+- Optional ReplayGain-based volume normalization.
+- Playback session persistence between application launches.
+- Immediate removal of deleted tracks from playback, the queue, history, and
+  visible library pages.
 
-### Управление звуком
+### Audio controls
 
-- общий регулятор громкости с управлением курсором и колёсиком мыши;
-- быстрое отключение звука с восстановлением предыдущей громкости;
-- динамические индикаторы уровня громкости;
-- выбор доступного устройства вывода звука;
-- интеграция с медиасистемой macOS, системным виджетом Now Playing и медиа-клавишами.
+- Volume slider with pointer and mouse-wheel control.
+- Mute toggle that restores the previous volume.
+- Dynamic volume-level icons.
+- Audio output device selection.
+- macOS Now Playing integration and media-key support.
 
-### Интерфейс
+### Interface
 
-- режимы правой панели: «Проигрывание», «Метаданные» и «История»;
-- отображение текущего трека, автора, альбома и очереди;
-- анимированная обложка в виде вращающегося диска;
-- редактирование названия, автора, альбома, номера трека и обложки;
-- адаптивные панели и карточки для изменения размера окна;
-- полупрозрачный фон окна и диалогов с настраиваемым blur-эффектом;
-- настройка прозрачности отдельных элементов интерфейса;
-- выбор пользовательского шрифта;
-- светлая, тёмная и дополнительные встроенные темы: Tokyo Night, Nordic, Dracula и Synthwave;
-- поддержка пользовательских тем в JSON-формате;
-- русский и английский интерфейс;
-- поддержка пользовательских языковых пакетов;
-- встроенная проверка и установка обновлений из GitHub Releases.
+- Playback, metadata, and history modes in the right-hand panel.
+- Current track, artist, album, artwork, and queue information.
+- Animated disc-style artwork.
+- Editing for track title, artist, album, track number, and cover art.
+- Responsive panels and cards.
+- Optional window transparency and blur.
+- Configurable transparency for individual interface elements.
+- Custom interface font selection.
+- Light, dark, Tokyo Night, Nordic, Dracula, and Synthwave themes.
+- Custom themes in JSON format.
+- English and Russian interfaces.
+- Custom language packs.
+- Built-in GitHub Releases update checking and installation.
+- Native macOS title bars, window controls, and standard close/quit behavior.
 
-## Горячие клавиши
+## Before downloading from YouTube
 
-| Сочетание | Действие |
-| --- | --- |
-| `Пробел` | Воспроизведение или пауза |
-| `Cmd + ↑` | Увеличить громкость |
-| `Cmd + ↓` | Уменьшить громкость |
-| `Cmd + →` | Следующий трек |
-| `Cmd + ←` | Предыдущий трек |
-| `Cmd + ,` | Открыть настройки |
+YouTube may require cookies from an authenticated browser session for downloads
+to work correctly.
 
-На macOS также поддерживаются системные клавиши воспроизведения, паузы и переключения треков.
+Before using `yt-dlp`:
 
-## Хранение данных
+1. Sign in to YouTube in your preferred browser.
+2. Open **Compact → Settings**.
+3. Under **YouTube cookies**, select the browser that contains the active
+   YouTube session.
+4. Close Settings and start the download.
 
-По умолчанию Compact создаёт корневую папку медиатеки:
+Supported browser options:
+
+- Safari
+- Google Chrome
+- Firefox
+- Microsoft Edge
+- Brave
+- Chromium
+- Zen
+- Twilight
+
+You can also select a cookies file manually. Browser or cookies-file access is
+performed locally by `yt-dlp`; Compact does not upload browser cookies.
+
+> [!IMPORTANT]
+> Select the correct browser before starting a download. If no browser is
+> selected, or the selected browser has no active YouTube session, `yt-dlp` may
+> fail with an authentication, bot-check, or unavailable-format error.
+
+## Keyboard shortcuts
+
+| Action | macOS | Windows | Linux |
+| --- | --- | --- | --- |
+| Play or pause | `Space` | `Space` | `Space` |
+| Increase volume | `Cmd + ↑` | `Ctrl + ↑` | `Ctrl + ↑` |
+| Decrease volume | `Cmd + ↓` | `Ctrl + ↓` | `Ctrl + ↓` |
+| Next track | `Cmd + →` | `Ctrl + →` | `Ctrl + →` |
+| Previous track | `Cmd + ←` | `Ctrl + ←` | `Ctrl + ←` |
+| Open Settings | `Cmd + ,` | `Ctrl + ,` | `Ctrl + ,` |
+| Close the active window or dialog | `Cmd + W` | `Ctrl + W` | `Ctrl + W` |
+| Quit Compact | `Cmd + Q` | `Ctrl + Q` | `Ctrl + Q` |
+| Play, pause, next, or previous | System media keys | System media keys | System media keys |
+
+`Space` does not toggle playback while a text field is focused. Availability of
+system media keys depends on the operating system and desktop environment.
+
+## Data storage
+
+By default, Compact creates its library root at:
 
 ```text
 ~/Music/Compact
 ```
 
-Внутри неё используются каталоги:
+The library contains:
 
 ```text
 Compact/
@@ -85,9 +127,9 @@ Compact/
 └── playlists/
 ```
 
-Другую корневую папку можно выбрать в интерфейсе приложения.
+A different library root can be selected from the application.
 
-Пользовательские ресурсы на macOS размещаются в каталоге настроек Compact:
+On macOS, user resources and logs are stored in:
 
 ```text
 ~/Library/Application Support/Compact/
@@ -96,18 +138,32 @@ Compact/
 └── themes/
 ```
 
-Описание форматов находится в [`assets/languages/README.md`](assets/languages/README.md) и [`assets/themes/README.md`](assets/themes/README.md).
+The main application log is:
 
-## Требования
+```text
+~/Library/Application Support/Compact/logs/compact.log
+```
 
-- Python 3.10 или новее;
-- PyQt6;
-- FFmpeg для запуска из исходного кода (в готовую macOS-сборку он уже встроен);
-- macOS для системной интеграции Now Playing и готовой `.app`/`.dmg`-сборки.
+See [`assets/languages/README.md`](assets/languages/README.md) and
+[`assets/themes/README.md`](assets/themes/README.md) for the custom language and
+theme formats.
 
-Полный список Python-зависимостей указан в [`requirements.txt`](requirements.txt).
+## Requirements
 
-## Запуск из исходного кода
+- Python 3.10 or newer.
+- FFmpeg and FFprobe when running from source.
+- A supported desktop environment for PyQt6.
+- macOS for Now Playing integration and the prebuilt `.app`/`.dmg` package.
+
+FFmpeg and FFprobe are bundled with the published macOS application, so no
+separate installation or path configuration is required for that build.
+
+All Python dependencies are listed in
+[`requirements.txt`](requirements.txt).
+
+## Run from source
+
+### macOS and Linux
 
 ```bash
 python3 -m venv .vnv
@@ -116,34 +172,60 @@ python3 -m pip install -r requirements.txt
 python3 app.py
 ```
 
-Также можно воспользоваться скриптом запуска:
+On macOS, the launcher script can also be used:
 
 ```bash
 ./start.command
 ```
 
-## Сборка для macOS
+### Windows
+
+```powershell
+py -m venv .vnv
+.\.vnv\Scripts\Activate.ps1
+py -m pip install -r requirements.txt
+py app.py
+```
+
+When running from source, make sure both `ffmpeg` and `ffprobe` are available in
+`PATH`, placed in the repository's `bin` directory, or selected from Compact's
+FFmpeg setup dialog.
+
+## Build for macOS
 
 ```bash
 ./build_macos.command
 ```
 
-Скрипт устанавливает необходимые сборочные зависимости, запускает PyInstaller с конфигурацией `Compact.spec` и создаёт:
+The script installs the required build dependencies, runs PyInstaller with
+`Compact.spec`, and creates:
 
 ```text
 dist/Compact.app
 dist/Compact.dmg
 ```
 
-Готовые версии приложения доступны в разделе [Releases](https://github.com/ZERv3/Compact/releases).
+Published builds are available on the
+[GitHub Releases page](https://github.com/ZERv3/Compact/releases).
 
-## Технологии
+## Key technologies and libraries
 
-- [PyQt6](https://www.riverbankcomputing.com/software/pyqt/) — интерфейс и мультимедиа;
-- [Mutagen](https://mutagen.readthedocs.io/) — чтение и изменение метаданных;
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) — загрузка аудио;
-- [FFmpeg](https://ffmpeg.org/) — встроенная обработка аудио (статические
-  macOS arm64-сборки из
-  [eugeneware/ffmpeg-static](https://github.com/eugeneware/ffmpeg-static));
-- [PyObjC](https://pyobjc.readthedocs.io/) — интеграция с медиасистемой macOS;
-- [PyInstaller](https://pyinstaller.org/) — сборка приложения.
+| Technology | Used for |
+| --- | --- |
+| [Python](https://www.python.org/) | Application logic, library management, downloads, and background workers. |
+| [PyQt6](https://www.riverbankcomputing.com/software/pyqt/) | Desktop interface, widgets, dialogs, threading signals, audio playback, output-device selection, and SVG rendering. |
+| [yt-dlp](https://github.com/yt-dlp/yt-dlp) | YouTube metadata extraction, authenticated browser-cookie access, audio downloads, playlists, and download progress. |
+| [FFmpeg and FFprobe](https://ffmpeg.org/) | Audio extraction and conversion, MP3 encoding, slicing, stream inspection, cover embedding, and metadata remuxing. |
+| [Mutagen](https://mutagen.readthedocs.io/) | Reading and writing MP3/ID3 metadata, artwork, track numbers, duration, and ReplayGain values. |
+| [PyObjC](https://pyobjc.readthedocs.io/) | Native macOS window behavior and MediaPlayer/Now Playing integration. |
+| [certifi](https://github.com/certifi/python-certifi) | Bundled certificate authority store for reliable HTTPS requests in packaged builds. |
+| [PyInstaller](https://pyinstaller.org/) | Packaging Python, PyQt6, certificates, assets, FFmpeg, and FFprobe into the macOS application bundle. |
+
+The bundled macOS arm64 FFmpeg binaries are based on the static builds from
+[`eugeneware/ffmpeg-static`](https://github.com/eugeneware/ffmpeg-static).
+
+## License and third-party components
+
+Compact depends on third-party open-source projects. Their respective licenses
+continue to apply. Review the linked project pages and bundled component
+licenses when redistributing the application.
