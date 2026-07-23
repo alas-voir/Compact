@@ -161,7 +161,7 @@ from .youtube_urls import normalize_youtube_track_url
 
 
 class MainWindow(QMainWindow):
-    PROJECT_VERSION = "0.8.1"
+    PROJECT_VERSION = "0.8.2"
     PROJECT_GITHUB_URL = "https://github.com/alas-voir/Compact"
 
     def __init__(self) -> None:
