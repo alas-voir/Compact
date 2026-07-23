@@ -170,6 +170,8 @@ class SettingsDialog(QDialog):
             ("Edge", "edge"),
             ("Brave", "brave"),
             ("Chromium", "chromium"),
+            ("Zen", "zen"),
+            ("Twilight", "twilight"),
         ]:
             self.youtube_browser_combo.addItem(browser_name, browser_key)
         browser_index = self.youtube_browser_combo.findData(
@@ -458,16 +460,28 @@ class SettingsDialog(QDialog):
         self.volume_normalization_switch.set_dark_theme(self.is_dark_theme())
         self.window_transparency_switch.set_dark_theme(self.is_dark_theme())
         self.window_blur_switch.set_dark_theme(self.is_dark_theme())
-        self.crossfade_seconds_spin.setStyleSheet(self.theme_combo.styleSheet())
-        self.window_transparency_percent_spin.setStyleSheet(
-            self.theme_combo.styleSheet()
+        spin_style = (
+            "QSpinBox {"
+            f"background:{input_bg};"
+            f"border:1px solid {input_border};"
+            "border-radius:8px;"
+            f"color:{text_primary};"
+            "padding:6px 24px 6px 10px;"
+            "min-height:22px;"
+            "}"
+            "QSpinBox::up-button, QSpinBox::down-button {"
+            "background:transparent;"
+            "border:none;"
+            "width:20px;"
+            "}"
         )
-        self.window_blur_radius_spin.setStyleSheet(
-            self.theme_combo.styleSheet()
-        )
-        self.element_transparency_percent_spin.setStyleSheet(
-            self.theme_combo.styleSheet()
-        )
+        for spin_box in (
+            self.crossfade_seconds_spin,
+            self.window_transparency_percent_spin,
+            self.window_blur_radius_spin,
+            self.element_transparency_percent_spin,
+        ):
+            spin_box.setStyleSheet(spin_style)
 
 
 class MetadataDialog(QDialog):

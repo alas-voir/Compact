@@ -15,10 +15,8 @@ from PyQt6.QtGui import (
     QIcon,
     QKeySequence,
     QPainter,
-    QPainterPath,
     QPalette,
     QPixmap,
-    QRegion,
 )
 from PyQt6.QtMultimedia import QAudioOutput, QMediaDevices, QMediaPlayer
 
@@ -111,13 +109,13 @@ from .playlist_storage import (
 from .settings import (
     load_audio_settings,
     load_window_effect_settings,
-    load_elenveil_root_dir,
+    load_compact_root_dir,
     load_interface_font_family,
     load_language_code,
     load_theme_mode,
     load_youtube_auth_settings,
     load_playback_session,
-    save_elenveil_root_dir,
+    save_compact_root_dir,
     save_interface_font_family,
     save_language_code,
     save_theme_mode,
@@ -138,7 +136,6 @@ from .widgets import (
     ClickableLabel,
     DownloadCard,
     DownloadQueueCard,
-    DialogTitleBar,
     HomeAuthorCard,
     HoverCoverLabel,
     PlaylistListItemWidget,
@@ -176,7 +173,7 @@ class MainWindow(QMainWindow):
             self.setAttribute(
                 Qt.WidgetAttribute.WA_TranslucentBackground, True
             )
-        self.logger = get_logger("elenveil.main_window")
+        self.logger = get_logger("compact.main_window")
         self.setWindowTitle("Compact")
         self.resize(1180, 720)
         self.startup_root_dir_warning = ""
@@ -369,17 +366,17 @@ class MainWindow(QMainWindow):
         self.sort_field = "date"
         self.sort_ascending = False
         self.animation_phase = False
-        default_elenveil_root_dir = self.default_elenveil_root_dir()
-        self.elenveil_root_dir = ""
+        default_compact_root_dir = self.default_compact_root_dir()
+        self.compact_root_dir = ""
         self.music_library_dir = ""
         self.playlists_dir = ""
-        self.initialize_elenveil_root_dir(
-            load_elenveil_root_dir() or default_elenveil_root_dir,
-            default_elenveil_root_dir,
+        self.initialize_compact_root_dir(
+            load_compact_root_dir() or default_compact_root_dir,
+            default_compact_root_dir,
         )
         self.logger.info(
             "Library paths initialized | root=%s | music=%s | playlists=%s",
-            self.elenveil_root_dir,
+            self.compact_root_dir,
             self.music_library_dir,
             self.playlists_dir,
         )
@@ -397,17 +394,17 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
 
-        self.select_elenveil_root_button = QPushButton()
-        self.select_elenveil_root_button.setToolTip("Выбрать папку библиотеки")
-        self.select_elenveil_root_button.setAccessibleName("Выбрать папку библиотеки")
-        self.select_elenveil_root_button.setFixedSize(36, 36)
-        self.select_elenveil_root_button.setStyleSheet(
+        self.select_compact_root_button = QPushButton()
+        self.select_compact_root_button.setToolTip("Выбрать папку библиотеки")
+        self.select_compact_root_button.setAccessibleName("Выбрать папку библиотеки")
+        self.select_compact_root_button.setFixedSize(36, 36)
+        self.select_compact_root_button.setStyleSheet(
             "QPushButton { background:#2e3136; border:1px solid #3b3f46; border-radius:8px; }"
             "QPushButton:hover { background:#373b43; }"
             "QPushButton:disabled { background:#2a2d33; border-color:#353941; }"
         )
-        self.select_elenveil_root_button.clicked.connect(
-            self.choose_elenveil_root_directory
+        self.select_compact_root_button.clicked.connect(
+            self.choose_compact_root_directory
         )
         self.open_music_folder_button = QPushButton()
         self.open_music_folder_button.setToolTip("Открыть папку библиотеки")
@@ -418,7 +415,7 @@ class MainWindow(QMainWindow):
             "QPushButton:hover { background:#373b43; }"
             "QPushButton:disabled { background:#2a2d33; border-color:#353941; }"
         )
-        self.open_music_folder_button.clicked.connect(self.open_elenveil_music_folder)
+        self.open_music_folder_button.clicked.connect(self.open_compact_music_folder)
         self.create_playlist_button = QPushButton()
         self.create_playlist_button.setToolTip("Добавить")
         self.create_playlist_button.setAccessibleName("Добавить")
@@ -709,12 +706,12 @@ class MainWindow(QMainWindow):
         playlists_root_layout.setContentsMargins(0, 0, 0, 0)
         playlists_root_layout.setSpacing(0)
 
-        self.macos_traffic_light_spacer = self.create_macos_traffic_light_widget()
+        self.macos_titlebar_spacer = self.create_macos_titlebar_spacer()
         self.playlists_controls_panel, playlists_controls_layout = (
             self.create_section_panel(
                 "",
                 left_header_widgets=[
-                    self.macos_traffic_light_spacer,
+                    self.macos_titlebar_spacer,
                     self.library_view_button,
                 ],
                 right_header_widgets=[self.create_playlist_button],
@@ -1279,7 +1276,7 @@ class MainWindow(QMainWindow):
             QEvent.Type.ActivationChange,
             QEvent.Type.WindowStateChange,
         }:
-            QTimer.singleShot(0, self.position_macos_traffic_lights)
+            QTimer.singleShot(0, self.position_macos_window_buttons)
         super().changeEvent(event)
 
     def showEvent(self, event) -> None:
@@ -1287,53 +1284,10 @@ class MainWindow(QMainWindow):
         if sys.platform == "darwin" and not self.native_titlebar_configured:
             QTimer.singleShot(0, self.configure_macos_unified_titlebar)
 
-    def create_macos_traffic_light_widget(self) -> QWidget:
+    def create_macos_titlebar_spacer(self) -> QWidget:
         container = QWidget()
-        if sys.platform != "darwin":
-            container.setFixedSize(0, 40)
-            return container
-        container.setFixedSize(74, 40)
-        controls_layout = QHBoxLayout(container)
-        controls_layout.setContentsMargins(2, 0, 2, 0)
-        controls_layout.setSpacing(8)
-        controls_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
-        self.macos_close_button = QToolButton()
-        self.macos_minimize_button = QToolButton()
-        self.macos_zoom_button = QToolButton()
-        controls = (
-            (self.macos_close_button, "#ff5f57", "Закрыть"),
-            (self.macos_minimize_button, "#febc2e", "Свернуть"),
-            (self.macos_zoom_button, "#28c840", "На весь экран"),
-        )
-        for button, color, tooltip in controls:
-            button.setFixedSize(14, 14)
-            button.setToolTip(tooltip)
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.setStyleSheet(
-                "QToolButton {"
-                f"background:{color}; border:none; border-radius:7px; padding:0;"
-                "}"
-                "QToolButton:hover { border:1px solid rgba(0,0,0,0.28); }"
-                "QToolButton:pressed { border:2px solid rgba(0,0,0,0.32); }"
-            )
-            controls_layout.addWidget(button)
-        self.macos_close_button.clicked.connect(self.close)
-        self.macos_minimize_button.clicked.connect(self.showMinimized)
-        self.macos_zoom_button.clicked.connect(self.toggle_macos_window_zoom)
+        container.setFixedSize(0, 40)
         return container
-
-    def toggle_macos_window_zoom(self) -> None:
-        native_window = getattr(self, "macos_native_window", None)
-        if native_window is not None:
-            try:
-                native_window.toggleFullScreen_(None)
-                return
-            except Exception:
-                pass
-        if self.isMaximized():
-            self.showNormal()
-        else:
-            self.showMaximized()
 
     def configure_macos_unified_titlebar(self) -> None:
         if sys.platform != "darwin" or self.native_titlebar_configured:
@@ -1342,7 +1296,7 @@ class MainWindow(QMainWindow):
             import objc
             from AppKit import (
                 NSWindowStyleMaskFullSizeContentView,
-                NSWindowTitleHidden,
+                NSWindowTitleVisible,
             )
 
             native_view = objc.objc_object(
@@ -1353,10 +1307,10 @@ class MainWindow(QMainWindow):
                 return
             native_window.setStyleMask_(
                 native_window.styleMask()
-                | NSWindowStyleMaskFullSizeContentView
+                & ~NSWindowStyleMaskFullSizeContentView
             )
-            native_window.setTitlebarAppearsTransparent_(True)
-            native_window.setTitleVisibility_(NSWindowTitleHidden)
+            native_window.setTitlebarAppearsTransparent_(False)
+            native_window.setTitleVisibility_(NSWindowTitleVisible)
             native_window.setMovableByWindowBackground_(False)
             self.configure_macos_vibrancy(native_view, native_window)
             if native_window.respondsToSelector_(
@@ -1366,7 +1320,7 @@ class MainWindow(QMainWindow):
             self.native_titlebar_configured = True
             self.macos_native_window = native_window
             self.apply_macos_window_effect_settings()
-            QTimer.singleShot(0, self.position_macos_traffic_lights)
+            QTimer.singleShot(0, self.position_macos_window_buttons)
         except Exception as exc:
             self.logger.warning(
                 "Unable to configure unified macOS titlebar: %s", exc
@@ -1450,7 +1404,7 @@ class MainWindow(QMainWindow):
             else NSColor.windowBackgroundColor()
         )
 
-    def position_macos_traffic_lights(self) -> None:
+    def position_macos_window_buttons(self) -> None:
         if (
             sys.platform != "darwin"
             or not getattr(self, "native_titlebar_configured", False)
@@ -1473,11 +1427,11 @@ class MainWindow(QMainWindow):
                     button_type
                 )
                 if native_button is not None:
-                    native_button.setAlphaValue_(0.0)
-                    native_button.setHidden_(True)
-                    native_button.setEnabled_(False)
+                    native_button.setAlphaValue_(1.0)
+                    native_button.setHidden_(False)
+                    native_button.setEnabled_(True)
         except Exception as exc:
-            self.logger.warning("Unable to hide native macOS traffic lights: %s", exc)
+            self.logger.warning("Unable to show native macOS window buttons: %s", exc)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -1485,7 +1439,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self.sync_footer_sections)
         QTimer.singleShot(0, self.update_playback_disc_size)
         if sys.platform == "darwin":
-            QTimer.singleShot(0, self.position_macos_traffic_lights)
+            QTimer.singleShot(0, self.position_macos_window_buttons)
         self.position_track_search_icon()
         self.position_tracks_context_label()
         self.reposition_toast()
@@ -1591,37 +1545,23 @@ class MainWindow(QMainWindow):
                 QEvent.Type.Show,
                 QEvent.Type.Resize,
             }:
-                chrome = getattr(watched, "compact_title_bar", None)
-                if chrome is not None:
-                    background = getattr(watched, "compact_background", None)
-                    if background is not None:
-                        background.setGeometry(watched.rect())
-                        background.lower()
-                        background.show()
-                    chrome.setGeometry(1, 1, max(0, watched.width() - 2), 34)
-                    chrome.sync_title()
-                    chrome.raise_()
-                    chrome.show()
-                    self.apply_dialog_rounded_mask(watched)
-                    if (
-                        event.type() == QEvent.Type.Show
-                        and sys.platform == "darwin"
-                        and not hasattr(
-                            watched, "compact_visual_effect_view"
-                        )
-                    ):
-                        QTimer.singleShot(
-                            0,
-                            lambda dialog=watched: (
-                                self.configure_macos_dialog_vibrancy(
-                                    dialog
-                                )
-                            ),
-                        )
-            elif event.type() == QEvent.Type.WindowTitleChange:
-                chrome = getattr(watched, "compact_title_bar", None)
-                if chrome is not None:
-                    chrome.sync_title()
+                if (
+                    event.type() == QEvent.Type.Show
+                    and sys.platform == "darwin"
+                    and not hasattr(watched, "compact_native_window")
+                ):
+                    QTimer.singleShot(
+                        0,
+                        lambda dialog=watched: (
+                            self.configure_macos_dialog_window(dialog)
+                        ),
+                    )
+        if (
+            hasattr(self, "playlist_list")
+            and watched is self.playlist_list.viewport()
+            and event.type() == QEvent.Type.Resize
+        ):
+            QTimer.singleShot(0, self.sync_sidebar_item_widths)
         if sys.platform == "darwin" and event.type() in {
             QEvent.Type.Show,
             QEvent.Type.Hide,
@@ -1631,7 +1571,7 @@ class MainWindow(QMainWindow):
             QEvent.Type.ApplicationActivate,
             QEvent.Type.ApplicationDeactivate,
         }:
-            QTimer.singleShot(0, self.position_macos_traffic_lights)
+            QTimer.singleShot(0, self.position_macos_window_buttons)
         if event.type() == QEvent.Type.KeyPress:
             key = event.key()
             if self.command_modifier_active(event):
@@ -1733,28 +1673,32 @@ class MainWindow(QMainWindow):
         )
 
     def install_compact_dialog_chrome(self, dialog: QDialog) -> None:
-        if getattr(dialog, "compact_title_bar", None) is not None:
+        if getattr(dialog, "compact_native_chrome_installed", False):
             return
-        dialog.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+        dialog.compact_native_chrome_installed = True
+        dialog.setWindowFlag(Qt.WindowType.FramelessWindowHint, False)
+        dialog.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, True)
+        dialog.setWindowFlag(Qt.WindowType.WindowMinimizeButtonHint, True)
+        dialog.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
         dialog.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
-        dialog.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        dialog.setAutoFillBackground(False)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        dialog.setAutoFillBackground(True)
         dialog.setPalette(self.build_theme_palette(self.theme_mode))
         layout = dialog.layout()
         if layout is not None:
             margins = layout.contentsMargins()
             layout.setContentsMargins(
                 margins.left(),
-                margins.top() + 34,
+                margins.top(),
                 margins.right(),
                 margins.bottom(),
             )
         colors = self.theme_colors()
-        dialog_background = self.translucent_dialog_background(colors["app_bg"])
+        dialog_background = colors["app_bg"]
         dialog.setStyleSheet(
             dialog.styleSheet()
             + "QDialog, QMessageBox, QInputDialog, QFileDialog {"
-            f"background:transparent; color:{colors['text_primary']};"
+            f"background:{dialog_background}; color:{colors['text_primary']};"
             "border:none;"
             "}"
             "QDialog QLabel, QMessageBox QLabel, QInputDialog QLabel, QFileDialog QLabel {"
@@ -1774,112 +1718,59 @@ class MainWindow(QMainWindow):
             f"border:1px solid {colors['panel_border']}; border-radius:8px;"
             "}"
         )
-        dialog.compact_background = QFrame(dialog)
-        dialog.compact_background.setObjectName("compact_dialog_background")
-        dialog.compact_background.setAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
-        )
-        dialog.compact_background.setGeometry(dialog.rect())
-        dialog.compact_background.setStyleSheet(
-            "QFrame#compact_dialog_background {"
-            f"background:{dialog_background};"
-            f"border:1px solid {colors['panel_border']};"
-            "border-radius:12px;"
-            "}"
-        )
-        dialog.compact_background.lower()
-        dialog.compact_background.show()
-        dialog.compact_title_bar = DialogTitleBar(
-            dialog, self.is_dark_theme()
-        )
-        dialog.compact_title_bar.setStyleSheet(
-            dialog.compact_title_bar.styleSheet()
-            + "QWidget#compact_dialog_titlebar { background:transparent; }"
-        )
-        dialog.compact_title_bar.setGeometry(
-            1, 1, max(0, dialog.width() - 2), 34
-        )
-        dialog.resize(dialog.width(), dialog.height() + 34)
-        dialog.compact_background.setGeometry(dialog.rect())
-        dialog.compact_background.lower()
-        self.apply_dialog_rounded_mask(dialog)
 
-    def configure_macos_dialog_vibrancy(self, dialog: QDialog) -> None:
+    def configure_macos_dialog_window(self, dialog: QDialog) -> None:
         if (
             sys.platform != "darwin"
-            or hasattr(dialog, "compact_visual_effect_view")
+            or hasattr(dialog, "compact_native_window")
         ):
             return
         try:
             import objc
             from AppKit import (
-                NSColor,
-                NSViewHeightSizable,
-                NSViewWidthSizable,
-                NSVisualEffectBlendingModeBehindWindow,
-                NSVisualEffectMaterialUnderWindowBackground,
-                NSVisualEffectStateActive,
-                NSVisualEffectView,
+                NSWindowCloseButton,
+                NSWindowMiniaturizeButton,
+                NSWindowStyleMaskFullSizeContentView,
+                NSWindowTitleVisible,
+                NSWindowZoomButton,
             )
-            from Quartz import CIFilter
 
             native_view = objc.objc_object(c_void_p=int(dialog.winId()))
             native_window = native_view.window()
             if native_window is None:
                 return
-            effect_view = NSVisualEffectView.alloc().initWithFrame_(
-                native_view.bounds()
+            native_window.setStyleMask_(
+                native_window.styleMask()
+                & ~NSWindowStyleMaskFullSizeContentView
             )
-            effect_view.setAutoresizingMask_(
-                NSViewWidthSizable | NSViewHeightSizable
-            )
-            effect_view.setMaterial_(
-                NSVisualEffectMaterialUnderWindowBackground
-            )
-            effect_view.setBlendingMode_(
-                NSVisualEffectBlendingModeBehindWindow
-            )
-            effect_view.setState_(NSVisualEffectStateActive)
-            effect_view.setHidden_(not self.window_blur_enabled)
-            effect_view.setWantsLayer_(True)
-            effect_layer = effect_view.layer()
-            if effect_layer is not None:
-                effect_layer.setCornerRadius_(12.0)
-                effect_layer.setMasksToBounds_(True)
-            if (
-                effect_layer is not None
-                and self.window_blur_enabled
-                and self.window_blur_radius > 0
+            native_window.setTitlebarAppearsTransparent_(False)
+            native_window.setTitleVisibility_(NSWindowTitleVisible)
+            native_window.setMovableByWindowBackground_(False)
+            if native_window.respondsToSelector_("setTitlebarSeparatorStyle:"):
+                native_window.setTitlebarSeparatorStyle_(0)
+            for button_type in (
+                NSWindowCloseButton,
+                NSWindowMiniaturizeButton,
+                NSWindowZoomButton,
             ):
-                blur_filter = CIFilter.filterWithName_("CIGaussianBlur")
-                blur_filter.setDefaults()
-                blur_filter.setValue_forKey_(
-                    float(self.window_blur_radius), "inputRadius"
-                )
-                effect_layer.setBackgroundFilters_([blur_filter])
-                dialog.compact_blur_filter = blur_filter
-            native_window.setContentView_(effect_view)
-            effect_view.addSubview_(native_view)
-            native_view.setFrame_(effect_view.bounds())
-            native_view.setAutoresizingMask_(
-                NSViewWidthSizable | NSViewHeightSizable
-            )
-            native_window.setOpaque_(False)
-            native_window.setBackgroundColor_(NSColor.clearColor())
+                native_button = native_window.standardWindowButton_(button_type)
+                if native_button is not None:
+                    native_button.setAlphaValue_(1.0)
+                    native_button.setHidden_(False)
+                    native_button.setEnabled_(True)
             native_window.setHasShadow_(True)
             dialog.compact_native_window = native_window
-            dialog.compact_visual_effect_view = effect_view
-            dialog.compact_qt_content_view = native_view
-            self.apply_dialog_rounded_mask(dialog)
+            native_window.makeKeyAndOrderFront_(None)
+            dialog.raise_()
+            dialog.activateWindow()
+            dialog.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
             self.logger.debug(
-                "Dialog blur configured | title=%s enabled=%s radius=%s",
+                "Native dialog window configured | title=%s",
                 dialog.windowTitle(),
-                self.window_blur_enabled,
-                self.window_blur_radius,
             )
         except Exception as error:
             self.logger.warning(
-                "Unable to configure dialog blur: %s", error
+                "Unable to configure native dialog window: %s", error
             )
 
     def translucent_dialog_background(self, color_value: str) -> str:
@@ -1899,17 +1790,6 @@ class MainWindow(QMainWindow):
             f"rgba({color.red()}, {color.green()}, {color.blue()}, "
             f"{opacity:.2f})"
         )
-
-    def apply_dialog_rounded_mask(self, dialog: QDialog) -> None:
-        if dialog.width() <= 0 or dialog.height() <= 0:
-            return
-        path = QPainterPath()
-        path.addRoundedRect(
-            QRectF(0.0, 0.0, float(dialog.width()), float(dialog.height())),
-            12.0,
-            12.0,
-        )
-        dialog.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
     def is_dark_theme(self) -> bool:
         return theme_is_dark(self.theme_mode)
@@ -1963,6 +1843,7 @@ class MainWindow(QMainWindow):
             if update_ui and hasattr(self, "experimental_page"):
                 self.reload_theme_icons()
                 self.apply_theme()
+                self.repolish_widget_tree(self)
         finally:
             self.theme_switch_in_progress = False
             if app is not None:
@@ -1972,6 +1853,16 @@ class MainWindow(QMainWindow):
                         self, "ignore_next_theme_palette_change", False
                     ),
                 )
+
+    def repolish_widget_tree(self, root: QWidget) -> None:
+        widgets = [root, *root.findChildren(QWidget)]
+        for widget in widgets:
+            style = widget.style()
+            style.unpolish(widget)
+            style.polish(widget)
+            widget.update()
+        root.updateGeometry()
+        root.repaint()
 
     def apply_interface_font(self) -> None:
         font = QFont(self.system_interface_font)
@@ -3519,7 +3410,7 @@ class MainWindow(QMainWindow):
             "background:transparent; border:none;"
         )
         for button in [
-            self.select_elenveil_root_button,
+            self.select_compact_root_button,
             self.open_music_folder_button,
             self.import_button,
             self.new_track_button,
@@ -4051,7 +3942,7 @@ class MainWindow(QMainWindow):
         self.update_tracks_toolbar_visibility()
 
     def refresh_local_music_tracks(self) -> None:
-        self.ensure_elenveil_directories()
+        self.ensure_compact_directories()
         self.local_music_tracks = scan_music_directory(self.music_library_dir)
         playlist_count_before_sync = len(self.playlists)
         self.sync_remote_playlists_with_library()
@@ -4376,9 +4267,9 @@ class MainWindow(QMainWindow):
             if widget is not None:
                 widget.setParent(None)
 
-    def open_elenveil_music_folder(self) -> None:
-        self.ensure_elenveil_directories()
-        QDesktopServices.openUrl(QUrl.fromLocalFile(self.elenveil_root_dir))
+    def open_compact_music_folder(self) -> None:
+        self.ensure_compact_directories()
+        QDesktopServices.openUrl(QUrl.fromLocalFile(self.compact_root_dir))
 
     def open_project_github(self) -> None:
         QDesktopServices.openUrl(QUrl(self.PROJECT_GITHUB_URL))
@@ -4387,7 +4278,7 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(
             self,
             version_text=self.PROJECT_VERSION,
-            active_folder_path=self.elenveil_root_dir,
+            active_folder_path=self.compact_root_dir,
             theme_mode=self.theme_mode,
             interface_font_family=self.interface_font_family,
             language_code=self.language_code,
@@ -4409,36 +4300,25 @@ class MainWindow(QMainWindow):
         dialog.update_button.clicked.connect(
             lambda: self.check_for_application_update(dialog)
         )
-        dialog.open_folder_button.clicked.connect(self.open_elenveil_music_folder)
+        dialog.open_folder_button.clicked.connect(self.open_compact_music_folder)
 
         def choose_folder() -> None:
-            previous_path = self.elenveil_root_dir
-            self.choose_elenveil_root_directory()
-            if self.elenveil_root_dir != previous_path:
-                dialog.set_active_folder_path(self.elenveil_root_dir)
+            previous_path = self.compact_root_dir
+            self.choose_compact_root_directory()
+            if self.compact_root_dir != previous_path:
+                dialog.set_active_folder_path(self.compact_root_dir)
 
         def update_theme() -> None:
             selected_mode = dialog.selected_theme_mode()
             if selected_mode == self.theme_mode:
                 return
-            dialog.setUpdatesEnabled(False)
             self.apply_theme_mode(selected_mode)
             dialog.set_theme_mode(selected_mode)
+            dialog.setPalette(self.build_theme_palette(selected_mode))
             dialog.set_icons(self.reveal_icon, self.choose_folder_icon)
             dialog.update_button.setIcon(self.update_icon)
             dialog.apply_theme()
-
-            def finish_dialog_theme_update() -> None:
-                if not dialog.isVisible():
-                    dialog.setUpdatesEnabled(True)
-                    return
-                dialog.apply_theme()
-                dialog.style().unpolish(dialog)
-                dialog.style().polish(dialog)
-                dialog.setUpdatesEnabled(True)
-                dialog.update()
-
-            QTimer.singleShot(0, finish_dialog_theme_update)
+            self.repolish_widget_tree(dialog)
 
         dialog.choose_folder_button.clicked.connect(choose_folder)
         dialog.theme_combo.currentIndexChanged.connect(lambda _index: update_theme())
@@ -4901,14 +4781,14 @@ class MainWindow(QMainWindow):
                         return
             self.retry_remote_playlist_track(playlist_index, track_index)
 
-    def default_elenveil_root_dir(self) -> str:
+    def default_compact_root_dir(self) -> str:
         return os.path.join(os.path.expanduser("~"), "Music", "Compact")
 
-    def initialize_elenveil_root_dir(
+    def initialize_compact_root_dir(
         self, preferred_root_dir: str, fallback_root_dir: str
     ) -> None:
         try:
-            self.set_elenveil_root_dir(preferred_root_dir, persist=False)
+            self.set_compact_root_dir(preferred_root_dir, persist=False)
             return
         except OSError:
             preferred_path = os.path.abspath(
@@ -4920,7 +4800,7 @@ class MainWindow(QMainWindow):
             if preferred_path == fallback_path:
                 raise
 
-            self.set_elenveil_root_dir(fallback_root_dir, persist=True)
+            self.set_compact_root_dir(fallback_root_dir, persist=True)
             self.startup_root_dir_warning = (
                 f"Папка по пути\n{preferred_path}\n\n"
                 "не была найдена, будет использован стандартный путь сохранения:\n\n"
@@ -4937,19 +4817,19 @@ class MainWindow(QMainWindow):
         )
         self.startup_root_dir_warning = ""
 
-    def update_elenveil_root_paths(self, root_dir: str) -> None:
+    def update_compact_root_paths(self, root_dir: str) -> None:
         normalized_root_dir = os.path.abspath(os.path.expanduser(root_dir.strip()))
-        self.elenveil_root_dir = normalized_root_dir
-        self.music_library_dir = os.path.join(self.elenveil_root_dir, "music")
-        self.playlists_dir = os.path.join(self.elenveil_root_dir, "playlists")
+        self.compact_root_dir = normalized_root_dir
+        self.music_library_dir = os.path.join(self.compact_root_dir, "music")
+        self.playlists_dir = os.path.join(self.compact_root_dir, "playlists")
 
-    def set_elenveil_root_dir(self, root_dir: str, persist: bool = True) -> None:
-        self.update_elenveil_root_paths(root_dir)
-        self.ensure_elenveil_directories()
+    def set_compact_root_dir(self, root_dir: str, persist: bool = True) -> None:
+        self.update_compact_root_paths(root_dir)
+        self.ensure_compact_directories()
         if persist:
-            save_elenveil_root_dir(self.elenveil_root_dir)
+            save_compact_root_dir(self.compact_root_dir)
 
-    def choose_elenveil_root_directory(self) -> None:
+    def choose_compact_root_directory(self) -> None:
         if any(
             worker is not None
             for worker in (
@@ -4968,13 +4848,13 @@ class MainWindow(QMainWindow):
         selected_dir = QFileDialog.getExistingDirectory(
             self,
             "Выберите папку библиотеки",
-            self.elenveil_root_dir or os.path.expanduser("~"),
+            self.compact_root_dir or os.path.expanduser("~"),
         )
         if not selected_dir:
             return
 
         try:
-            self.set_elenveil_root_dir(selected_dir)
+            self.set_compact_root_dir(selected_dir)
         except OSError as error:
             QMessageBox.warning(
                 self,
@@ -4984,8 +4864,8 @@ class MainWindow(QMainWindow):
             return
         self.reload_library_sources_after_root_change()
 
-    def ensure_elenveil_directories(self) -> None:
-        os.makedirs(self.elenveil_root_dir, exist_ok=True)
+    def ensure_compact_directories(self) -> None:
+        os.makedirs(self.compact_root_dir, exist_ok=True)
         os.makedirs(self.music_library_dir, exist_ok=True)
         os.makedirs(self.playlists_dir, exist_ok=True)
 
@@ -5000,7 +4880,7 @@ class MainWindow(QMainWindow):
         self.set_library_view_mode(self.library_view_mode)
 
     def restore_persisted_playlists(self) -> None:
-        self.ensure_elenveil_directories()
+        self.ensure_compact_directories()
         self.local_music_tracks = scan_music_directory(self.music_library_dir)
         persisted = load_playlists(self.playlists_dir)
         persisted = [playlist for playlist in persisted if playlist.source == "youtube"]
@@ -5070,6 +4950,20 @@ class MainWindow(QMainWindow):
                     show_delete=True,
                 )
         self.playlist_list.blockSignals(False)
+        QTimer.singleShot(0, self.sync_sidebar_item_widths)
+
+    def sync_sidebar_item_widths(self) -> None:
+        if not hasattr(self, "playlist_list"):
+            return
+        available_width = max(80, self.playlist_list.viewport().width() - 12)
+        for row, widget in enumerate(self.playlist_item_widgets):
+            if row >= self.playlist_list.count():
+                break
+            item = self.playlist_list.item(row)
+            item.setSizeHint(QSize(available_width, 54))
+            widget.setFixedWidth(available_width)
+        self.playlist_list.doItemsLayout()
+        self.playlist_list.viewport().update()
 
     def persist_playlist(self, playlist_index: int) -> None:
         if not (0 <= playlist_index < len(self.playlists)):
@@ -9395,9 +9289,9 @@ class MainWindow(QMainWindow):
         }
         self.playlist_loading_icon = self.status_icons[STATUS_META_LOADING]
         self.playlist_ready_icon = self.status_icons[STATUS_PENDING]
-        if hasattr(self, "select_elenveil_root_button"):
-            self.select_elenveil_root_button.setIcon(self.select_root_icon)
-            self.select_elenveil_root_button.setIconSize(QSize(18, 18))
+        if hasattr(self, "select_compact_root_button"):
+            self.select_compact_root_button.setIcon(self.select_root_icon)
+            self.select_compact_root_button.setIconSize(QSize(18, 18))
         if hasattr(self, "open_music_folder_button"):
             self.open_music_folder_button.setIcon(self.open_folder_icon)
             self.open_music_folder_button.setIconSize(QSize(18, 18))
@@ -9634,6 +9528,10 @@ class MainWindow(QMainWindow):
         return True
 
     def detect_default_ffmpeg_directory(self) -> str:
+        bundled_dir = resource_path("bin")
+        if self.validate_ffmpeg_directory(bundled_dir):
+            return bundled_dir
+
         preferred_dirs = ["/opt/homebrew/bin", "/opt/local/bin"]
         for candidate_dir in preferred_dirs:
             if self.validate_ffmpeg_directory(candidate_dir):
@@ -10075,7 +9973,7 @@ class MainWindow(QMainWindow):
             return None
 
     def download_single_track_to_music(self, task: DownloadTask) -> None:
-        self.ensure_elenveil_directories()
+        self.ensure_compact_directories()
         output_template = build_music_output_template(
             self.music_library_dir,
             title=task.meta_title or task.title,
@@ -10128,7 +10026,7 @@ class MainWindow(QMainWindow):
         thumbnail_data: bytes | None,
         segment_payloads: list[dict[str, object]],
     ) -> None:
-        self.ensure_elenveil_directories()
+        self.ensure_compact_directories()
         worker = SlicedTrackDownloadWorker(
             source_url,
             self.music_library_dir,
@@ -10430,7 +10328,7 @@ class MainWindow(QMainWindow):
         if track.status not in {STATUS_ERROR, STATUS_SKIPPED, STATUS_PENDING}:
             return
 
-        self.ensure_elenveil_directories()
+        self.ensure_compact_directories()
         self.start_button.setEnabled(False)
         self.create_playlist_button.setEnabled(False)
         self.active_remote_playlist_index = playlist_index
@@ -10550,7 +10448,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self.ensure_elenveil_directories()
+        self.ensure_compact_directories()
         self.start_button.setEnabled(False)
         self.create_playlist_button.setEnabled(False)
         self.active_remote_playlist_index = self.selected_playlist_index

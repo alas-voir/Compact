@@ -16,7 +16,7 @@ from .paths import resource_path
 from .time_utils import format_duration_mmss
 from .youtube_urls import normalize_youtube_track_url
 
-logger = get_logger("elenveil.workers")
+logger = get_logger("compact.workers")
 
 
 class WorkerCancelledError(Exception):
@@ -883,7 +883,7 @@ class SlicedTrackDownloadWorker(QObject):
             )
             verifier._verify_ffmpeg_tools(ffmpeg_dir)
 
-            with tempfile.TemporaryDirectory(prefix="elenveil-slice-") as temp_dir:
+            with tempfile.TemporaryDirectory(prefix="compact-slice-") as temp_dir:
                 source_path = self._download_source_media(temp_dir)
                 default_cover_path = self._write_default_cover(temp_dir)
                 for segment in self.segments:

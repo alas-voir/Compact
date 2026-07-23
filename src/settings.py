@@ -36,20 +36,27 @@ def save_app_settings(settings: dict) -> None:
     _write_json_file(path, settings)
 
 
-def load_elenveil_root_dir() -> str:
+def load_compact_root_dir() -> str:
     settings = load_app_settings()
     library = settings.get("library")
     if not isinstance(library, dict):
         return ""
-    return str(library.get("elenveil_root_dir") or "").strip()
+    root_dir = str(
+        library.get("compact_root_dir")
+        or library.get("elenveil_root_dir")
+        or ""
+    ).strip()
+    if root_dir and not library.get("compact_root_dir"):
+        save_compact_root_dir(root_dir)
+    return root_dir
 
 
-def save_elenveil_root_dir(path: str) -> None:
+def save_compact_root_dir(path: str) -> None:
     settings = load_app_settings()
     library = settings.get("library")
     if not isinstance(library, dict):
         library = {}
-    library["elenveil_root_dir"] = path.strip()
+    library["compact_root_dir"] = path.strip()
     settings["library"] = library
     save_app_settings(settings)
 

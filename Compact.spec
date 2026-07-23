@@ -15,8 +15,14 @@ def _existing_entries(entries):
     return filtered
 
 
-datas = [('assets', 'assets'), ('bin', 'bin')]
-binaries = []
+datas = [('assets', 'assets')]
+# FFmpeg must be declared as binaries rather than data.  This makes PyInstaller
+# inspect their Mach-O dependencies, copy the required dylibs into the bundle,
+# and rewrite the load paths so the tools work on Macs without MacPorts.
+binaries = [
+    ('bin/ffmpeg', 'bin'),
+    ('bin/ffprobe', 'bin'),
+]
 hiddenimports = []
 tmp_ret = collect_all('yt_dlp')
 datas += _existing_entries(tmp_ret[0])

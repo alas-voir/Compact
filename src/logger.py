@@ -52,11 +52,11 @@ def app_log_path() -> Path:
     if _LOG_FILE_PATH is None:
         logs_dir = user_config_dir() / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
-        _LOG_FILE_PATH = logs_dir / "elenveil.log"
+        _LOG_FILE_PATH = logs_dir / "compact.log"
     return _LOG_FILE_PATH
 
 
-def get_logger(name: str = "elenveil") -> logging.Logger:
+def get_logger(name: str = "compact") -> logging.Logger:
     return logging.getLogger(name)
 
 
@@ -99,13 +99,13 @@ def setup_app_logging() -> Path:
     )
     root_logger.addHandler(file_handler)
 
-    logger = get_logger("elenveil")
+    logger = get_logger("compact")
     _install_exception_hook(logger)
 
     original_stdout = sys.stdout
     original_stderr = sys.stderr
-    sys.stdout = _TeeStream(get_logger("elenveil.stdout"), logging.INFO, original_stdout)
-    sys.stderr = _TeeStream(get_logger("elenveil.stderr"), logging.ERROR, original_stderr)
+    sys.stdout = _TeeStream(get_logger("compact.stdout"), logging.INFO, original_stdout)
+    sys.stderr = _TeeStream(get_logger("compact.stderr"), logging.ERROR, original_stderr)
 
     logger.info("Logging initialized")
     logger.info("Log file: %s", log_path)

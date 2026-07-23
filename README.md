@@ -92,6 +92,7 @@ Compact/
 ```text
 ~/Library/Application Support/Compact/
 ├── languages/
+├── logs/
 └── themes/
 ```
 
@@ -101,7 +102,7 @@ Compact/
 
 - Python 3.10 или новее;
 - PyQt6;
-- FFmpeg, доступный приложению или `yt-dlp`;
+- FFmpeg для запуска из исходного кода (в готовую macOS-сборку он уже встроен);
 - macOS для системной интеграции Now Playing и готовой `.app`/`.dmg`-сборки.
 
 Полный список Python-зависимостей указан в [`requirements.txt`](requirements.txt).
@@ -141,5 +142,8 @@ dist/Compact.dmg
 - [PyQt6](https://www.riverbankcomputing.com/software/pyqt/) — интерфейс и мультимедиа;
 - [Mutagen](https://mutagen.readthedocs.io/) — чтение и изменение метаданных;
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) — загрузка аудио;
+- [FFmpeg](https://ffmpeg.org/) — встроенная обработка аудио (статические
+  macOS arm64-сборки из
+  [eugeneware/ffmpeg-static](https://github.com/eugeneware/ffmpeg-static));
 - [PyObjC](https://pyobjc.readthedocs.io/) — интеграция с медиасистемой macOS;
 - [PyInstaller](https://pyinstaller.org/) — сборка приложения.

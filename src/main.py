@@ -1,22 +1,28 @@
 import sys
 
+from .network import configure_network_security
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
+from .app_shortcuts import ApplicationWindowShortcutFilter
 from .logger import get_logger, setup_app_logging
-from .main_window import MainWindow
 from .paths import resource_path
 
 
 def main() -> None:
+    configure_network_security()
+    from .main_window import MainWindow
+
     log_path = setup_app_logging()
-    logger = get_logger("elenveil.main")
+    logger = get_logger("compact.main")
     logger.info("Application startup requested")
     QApplication.setAttribute(
         Qt.ApplicationAttribute.AA_DontUseNativeDialogs, True
     )
     app = QApplication(sys.argv)
+    app.window_shortcut_filter = ApplicationWindowShortcutFilter(app)
+    app.installEventFilter(app.window_shortcut_filter)
     app.setApplicationName("Compact")
     app.setApplicationDisplayName("Compact")
     app_icon_path = resource_path("assets", "icons", "Compact.icns")
