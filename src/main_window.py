@@ -162,7 +162,7 @@ from .youtube_urls import normalize_youtube_track_url
 
 class MainWindow(QMainWindow):
     PROJECT_VERSION = "0.8.1"
-    PROJECT_GITHUB_URL = "https://github.com/ZERv3/Compact"
+    PROJECT_GITHUB_URL = "https://github.com/alas-voir/Compact"
 
     def __init__(self) -> None:
         super().__init__()
@@ -421,6 +421,13 @@ class MainWindow(QMainWindow):
         self.create_playlist_button.setAccessibleName("Добавить")
         self.create_playlist_button.setFixedSize(40, 40)
         self.create_playlist_button.setMenu(self.build_add_menu())
+        self.open_library_folder_button = QPushButton()
+        self.open_library_folder_button.setToolTip("Открыть папку")
+        self.open_library_folder_button.setAccessibleName("Открыть папку")
+        self.open_library_folder_button.setFixedSize(40, 40)
+        self.open_library_folder_button.clicked.connect(
+            self.open_compact_music_folder
+        )
 
         self.import_button = QPushButton()
         self.import_button.setToolTip("Импорт")
@@ -714,7 +721,10 @@ class MainWindow(QMainWindow):
                     self.macos_titlebar_spacer,
                     self.library_view_button,
                 ],
-                right_header_widgets=[self.create_playlist_button],
+                right_header_widgets=[
+                    self.open_library_folder_button,
+                    self.create_playlist_button,
+                ],
             )
         )
         self.playlists_controls_panel.setObjectName("playlists_controls_inner")
@@ -2953,13 +2963,15 @@ class MainWindow(QMainWindow):
 
     def apply_transparent_add_button_style(self) -> None:
         colors = self.theme_colors()
-        self.create_playlist_button.setStyleSheet(
+        transparent_button_style = (
             "QPushButton { background:transparent; border:none; padding:3px; }"
             f"QPushButton:hover {{ background:{colors['button_hover']}; border:none; border-radius:8px; }}"
             "QPushButton:pressed { background:transparent; border:none; }"
             "QPushButton:disabled { background:transparent; border:none; }"
             "QPushButton::menu-indicator { image:none; width:0px; }"
         )
+        self.create_playlist_button.setStyleSheet(transparent_button_style)
+        self.open_library_folder_button.setStyleSheet(transparent_button_style)
 
     def apply_downloads_button_style(self, pulse: bool = False) -> None:
         if pulse:
@@ -3423,15 +3435,10 @@ class MainWindow(QMainWindow):
         self.apply_icon_button_style(self.settings_button)
         self.apply_downloads_button_style(self.downloads_button_pulse_active)
         self.library_view_button.setStyleSheet(
-            "QPushButton {"
-            "background:#d97a2b;"
-            "border:1px solid #c86b1f;"
-            "border-radius:10px;"
-            "padding:0;"
-            "}"
-            "QPushButton:hover { background:#e18738; }"
-            "QPushButton:pressed { background:#c96d22; }"
-            "QPushButton:disabled { background:#8b5b35; border-color:#8b5b35; }"
+            "QPushButton { background:transparent; border:none; padding:3px; }"
+            f"QPushButton:hover {{ background:{colors['button_hover']}; border:none; border-radius:8px; }}"
+            "QPushButton:pressed { background:transparent; border:none; }"
+            "QPushButton:disabled { background:transparent; border:none; }"
             "QPushButton::menu-indicator { image:none; width:0px; }"
         )
         self.library_back_button.setStyleSheet(
@@ -3943,7 +3950,9 @@ class MainWindow(QMainWindow):
 
     def refresh_local_music_tracks(self) -> None:
         self.ensure_compact_directories()
+        self.remove_empty_author_directories()
         self.local_music_tracks = scan_music_directory(self.music_library_dir)
+        self.remove_missing_tracks_from_playback()
         playlist_count_before_sync = len(self.playlists)
         self.sync_remote_playlists_with_library()
         self.deduplicate_playlists()
@@ -3954,6 +3963,81 @@ class MainWindow(QMainWindow):
                 if playlist_count_before_sync != len(self.playlists):
                     self.rebuild_playlist_list()
                 self.refresh_playlist_item_statuses()
+
+    def remove_empty_author_directories(self) -> None:
+        """Remove top-level author folders that contain no playable tracks."""
+        music_root = os.path.realpath(self.music_library_dir)
+        if not os.path.isdir(music_root):
+            return
+        for entry in os.scandir(music_root):
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            has_tracks = any(
+                filename.casefold().endswith(".mp3")
+                for _root, _directories, filenames in os.walk(entry.path)
+                for filename in filenames
+            )
+            if not has_tracks:
+                shutil.rmtree(entry.path)
+
+    def remove_missing_tracks_from_playback(self) -> None:
+        """Drop deleted files from playback state and stop a deleted current track."""
+        previous_state = (
+            tuple(self.playback_queue),
+            tuple(self.playback_source_queue),
+            tuple(self.playback_history),
+            tuple(self.playback_log),
+        )
+        current_path = (
+            os.path.realpath(self.playback_track_path)
+            if self.playback_track_path
+            else ""
+        )
+        current_was_deleted = bool(
+            current_path and not os.path.isfile(current_path)
+        )
+
+        def existing_paths(paths: list[str]) -> list[str]:
+            return [
+                os.path.realpath(path)
+                for path in paths
+                if path and os.path.isfile(path)
+            ]
+
+        self.playback_queue = existing_paths(self.playback_queue)
+        self.playback_source_queue = existing_paths(self.playback_source_queue)
+        self.playback_history = existing_paths(self.playback_history)
+        self.playback_log = existing_paths(self.playback_log)
+
+        if not current_was_deleted:
+            if current_path and current_path in self.playback_queue:
+                self.playback_queue_index = self.playback_queue.index(current_path)
+            current_state = (
+                tuple(self.playback_queue),
+                tuple(self.playback_source_queue),
+                tuple(self.playback_history),
+                tuple(self.playback_log),
+            )
+            if current_state != previous_state:
+                self.refresh_playback_cards()
+                self.refresh_playback_panel()
+                self.refresh_playback_history()
+            return
+
+        self.cancel_crossfade()
+        self.audio_player.stop()
+        self.audio_player.setSource(QUrl())
+        self.playback_track_path = ""
+        self.playback_panel_track_path = ""
+        self.playback_queue_index = -1
+        self.system_now_playing.clear()
+        if self.playback_queue:
+            self.playback_queue_index = 0
+            self.start_playback_path(self.playback_queue[0])
+            return
+        self.refresh_playback_cards()
+        self.refresh_playback_panel()
+        self.refresh_playback_history()
 
     def normalize_track_text(self, value: str) -> str:
         return " ".join(str(value or "").strip().casefold().split())
@@ -8925,6 +9009,11 @@ class MainWindow(QMainWindow):
             if os.path.exists(track.file_path):
                 os.remove(track.file_path)
         self.refresh_local_music_tracks()
+        if self.experimental_source_mode == "home":
+            self.clear_experimental_track_selection()
+            self.render_home_page()
+            self.update_metadata_panel()
+            return
         if self.experimental_source_mode == "author_albums":
             self.clear_experimental_track_selection()
             self.render_author_album_cards(self.selected_author_name or "")
@@ -9298,6 +9387,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, "create_playlist_button"):
             self.create_playlist_button.setIcon(self.add_playlist_icon)
             self.create_playlist_button.setIconSize(QSize(28, 28))
+        if hasattr(self, "open_library_folder_button"):
+            self.open_library_folder_button.setIcon(self.reveal_icon)
+            self.open_library_folder_button.setIconSize(QSize(22, 22))
         if hasattr(self, "add_track_action"):
             self.add_track_action.setIcon(self.add_track_icon)
         if hasattr(self, "add_list_action"):
