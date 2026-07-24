@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -88,14 +89,56 @@ def resolve_ffmpeg_binary(ffmpeg_dir: str) -> str:
     return ffmpeg_path or "ffmpeg"
 
 
+def resolve_javascript_runtime() -> tuple[str, str] | None:
+    """Return the preferred JavaScript runtime and its executable path."""
+    bundled_deno = resource_path("bin", "deno")
+    if os.path.isfile(bundled_deno) and os.access(bundled_deno, os.X_OK):
+        return "deno", bundled_deno
+    for runtime_name, executable_name in (
+        ("deno", "deno"),
+        ("node", "node"),
+        ("quickjs", "qjs"),
+    ):
+        executable = shutil.which(executable_name)
+        if executable:
+            return runtime_name, executable
+    return None
+
+
 def build_app_ytdlp_options(**overrides) -> dict:
     options = {
         "ignoreconfig": True,
         "quiet": True,
         "no_warnings": True,
     }
+    javascript_runtime = resolve_javascript_runtime()
+    if javascript_runtime:
+        runtime_name, executable = javascript_runtime
+        options["js_runtimes"] = {runtime_name: {"path": executable}}
+        logger.info("Resolved yt-dlp JavaScript runtime: %s (%s)", runtime_name, executable)
     options.update(overrides)
     return options
+
+
+def download_progress_percent(event: dict) -> float | None:
+    total_bytes = event.get("total_bytes") or event.get("total_bytes_estimate")
+    downloaded_bytes = event.get("downloaded_bytes", 0)
+    if total_bytes:
+        return max(0.0, min(100.0, downloaded_bytes * 100.0 / total_bytes))
+
+    fragment_count = event.get("fragment_count")
+    fragment_index = event.get("fragment_index")
+    if fragment_count and fragment_index is not None:
+        return max(0.0, min(100.0, fragment_index * 100.0 / fragment_count))
+
+    raw_percent = event.get("_percent_str")
+    if raw_percent:
+        cleaned = re.sub(r"\x1b\[[0-9;]*m", "", str(raw_percent)).strip().rstrip("%")
+        try:
+            return max(0.0, min(100.0, float(cleaned)))
+        except ValueError:
+            pass
+    return None
 
 
 def sanitize_ytdlp_options(options: dict) -> dict:
@@ -489,10 +532,8 @@ class DownloadWorker(QObject):
             raise WorkerCancelledError("Загрузка отменена пользователем.")
         status = event.get("status")
         if status == "downloading":
-            total_bytes = event.get("total_bytes") or event.get("total_bytes_estimate")
-            downloaded_bytes = event.get("downloaded_bytes", 0)
-            if total_bytes:
-                percent = max(0.0, min(100.0, downloaded_bytes * 100.0 / total_bytes))
+            percent = download_progress_percent(event)
+            if percent is not None:
                 self.progress_changed.emit(self.index, percent)
         elif status == "finished":
             self.progress_changed.emit(self.index, 100.0)

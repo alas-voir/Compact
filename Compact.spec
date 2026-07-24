@@ -22,9 +22,14 @@ datas = [('assets', 'assets')]
 binaries = [
     ('bin/ffmpeg', 'bin'),
     ('bin/ffprobe', 'bin'),
+    ('bin/deno', 'bin'),
 ]
 hiddenimports = []
 tmp_ret = collect_all('yt_dlp')
+datas += _existing_entries(tmp_ret[0])
+binaries += _existing_entries(tmp_ret[1])
+hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('yt_dlp_ejs')
 datas += _existing_entries(tmp_ret[0])
 binaries += _existing_entries(tmp_ret[1])
 hiddenimports += tmp_ret[2]
@@ -78,7 +83,7 @@ app = BUNDLE(
     icon='assets/icons/Compact.icns',
     bundle_identifier='app.compact.player',
     info_plist={
-        'CFBundleShortVersionString': '0.8.0',
-        'CFBundleVersion': '0.8.0',
+        'CFBundleShortVersionString': '0.8.2',
+        'CFBundleVersion': '0.8.2',
     },
 )

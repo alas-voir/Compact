@@ -63,6 +63,7 @@ from .dialogs import (
     dialog_theme_colors,
 )
 from .audio_normalization import replaygain_volume_factor
+from .crossfade import crossfade_gains
 from .logger import app_log_path, get_logger
 from .i18n import (
     install_language_event_filter,
@@ -1337,44 +1338,16 @@ class MainWindow(QMainWindow):
             )
 
     def configure_macos_vibrancy(self, native_view, native_window) -> None:
-        if sys.platform != "darwin" or hasattr(
-            self, "macos_visual_effect_view"
-        ):
+        if sys.platform != "darwin":
             return
-        from AppKit import (
-            NSColor,
-            NSViewHeightSizable,
-            NSViewWidthSizable,
-            NSVisualEffectBlendingModeBehindWindow,
-            NSVisualEffectMaterialUnderWindowBackground,
-            NSVisualEffectStateActive,
-            NSVisualEffectView,
-        )
-
-        effect_view = NSVisualEffectView.alloc().initWithFrame_(
-            native_view.bounds()
-        )
-        effect_view.setAutoresizingMask_(
-            NSViewWidthSizable | NSViewHeightSizable
-        )
-        effect_view.setMaterial_(
-            NSVisualEffectMaterialUnderWindowBackground
-        )
-        effect_view.setBlendingMode_(
-            NSVisualEffectBlendingModeBehindWindow
-        )
-        effect_view.setState_(NSVisualEffectStateActive)
-        native_window.setContentView_(effect_view)
-        effect_view.addSubview_(native_view)
-        native_view.setFrame_(effect_view.bounds())
-        native_view.setAutoresizingMask_(
-            NSViewWidthSizable | NSViewHeightSizable
-        )
-        native_window.setOpaque_(False)
-        native_window.setBackgroundColor_(NSColor.clearColor())
-        self.macos_visual_effect_view = effect_view
+        # Do not insert or reparent native views around Qt's content view.
+        # Both approaches are unsafe: replacing the content view corrupts
+        # layouts after maximize/restore, while adding NSVisualEffectView as
+        # its child can cover the complete Qt scene on some macOS versions.
+        # Qt keeps full ownership of the native hierarchy; the application
+        # still applies its configured translucency through widget palettes.
+        native_window.setOpaque_(True)
         self.macos_qt_content_view = native_view
-        self.apply_macos_window_effect_settings()
 
     def apply_macos_window_effect_settings(self) -> None:
         if (
@@ -4613,13 +4586,31 @@ class MainWindow(QMainWindow):
 
         popup.adjustSize()
         popup.setFixedHeight(min(max(popup.sizeHint().height(), 92), 420))
-        button_top_left = self.downloads_button.mapToGlobal(
-            self.downloads_button.rect().topLeft()
-        )
-        popup.move(button_top_left.x(), button_top_left.y() - popup.height() - 8)
+        self.position_downloads_popup()
         popup.finished.connect(lambda _result: self.clear_downloads_popup())
         popup.destroyed.connect(lambda *_args: self.clear_downloads_popup())
         popup.show()
+
+    def position_downloads_popup(self) -> None:
+        if not self.downloads_popup_is_alive():
+            return
+        button_top_left = self.downloads_button.mapToGlobal(
+            self.downloads_button.rect().topLeft()
+        )
+        window_rect = self.frameGeometry()
+        margin = 8
+        popup_x = max(
+            window_rect.left() + margin,
+            min(
+                button_top_left.x(),
+                window_rect.right() - self.downloads_popup.width() - margin,
+            ),
+        )
+        popup_y = max(
+            window_rect.top() + margin,
+            button_top_left.y() - self.downloads_popup.height() - margin,
+        )
+        self.downloads_popup.move(popup_x, popup_y)
 
     def clear_downloads_popup(self) -> None:
         self.download_queue_cards = []
@@ -4822,6 +4813,7 @@ class MainWindow(QMainWindow):
         self.downloads_popup.setFixedHeight(
             min(max(self.downloads_popup.sizeHint().height(), 92), 420)
         )
+        self.position_downloads_popup()
 
     def on_download_queue_status_requested(self, item_key: str) -> None:
         if not item_key:
@@ -8336,14 +8328,15 @@ class MainWindow(QMainWindow):
                 1.0,
                 self.crossfade_elapsed_ms / max(1, self.crossfade_seconds * 1000),
             )
+            outgoing_gain, incoming_gain = crossfade_gains(fraction)
             self.audio_output.setVolume(
                 self.normalized_output_volume(
-                    base_volume * (1.0 - fraction), self.playback_track_path
+                    base_volume * outgoing_gain, self.playback_track_path
                 )
             )
             self.crossfade_audio_output.setVolume(
                 self.normalized_output_volume(
-                    base_volume * fraction, self.crossfade_target_path
+                    base_volume * incoming_gain, self.crossfade_target_path
                 )
             )
         else:
@@ -8468,6 +8461,8 @@ class MainWindow(QMainWindow):
         if not self.crossfade_active:
             return
         previous_track_path = self.playback_track_path
+        target_track_path = self.crossfade_target_path
+        target_queue_index = self.crossfade_target_index
         self.crossfade_timer.stop()
         old_player = self.audio_player
         old_output = self.audio_output
@@ -8479,15 +8474,20 @@ class MainWindow(QMainWindow):
         self.connect_primary_player_signals()
         self.crossfade_player.stop()
         self.crossfade_audio_output.setVolume(0.0)
-        self.playback_queue_index = self.crossfade_target_index
-        self.playback_track_path = self.crossfade_target_path
+        self.playback_queue_index = target_queue_index
+        self.playback_track_path = target_track_path
         if previous_track_path != self.playback_track_path:
             self.remember_playback_track(previous_track_path)
             self.record_playback_log_entry(previous_track_path)
-        self.apply_audio_output_volumes()
         self.pending_disc_transition_direction = 1
         self.crossfade_active = False
         self.crossfade_elapsed_ms = 0
+        self.crossfade_target_index = -1
+        self.crossfade_target_path = ""
+        # Re-apply the normal volume only after the incoming player has become
+        # primary. While crossfade_active is true, a completed fade assigns the
+        # outgoing gain (zero) to self.audio_output after the player swap.
+        self.apply_audio_output_volumes()
         track = self.find_track_by_file_path(self.playback_track_path)
         self.system_now_playing.set_track(
             title=track.title if track else os.path.splitext(os.path.basename(self.playback_track_path))[0],
@@ -9327,9 +9327,9 @@ class MainWindow(QMainWindow):
         self.metadata_album_edit.setPlaceholderText("Общий альбом")
 
     def reload_theme_icons(self) -> None:
-        self.metadata_icon = QIcon(self.themed_icon_path("metadata_edit"))
-        self.cover_pick_icon = QIcon(self.themed_icon_path("cover_pick"))
-        self.cover_reset_icon = QIcon(self.themed_icon_path("cover_reset"))
+        self.metadata_icon = self.themed_raster_icon("metadata_edit", 20)
+        self.cover_pick_icon = self.themed_raster_icon("cover_pick", 20)
+        self.cover_reset_icon = self.themed_raster_icon("cover_reset", 20)
         self.save_icon = self.themed_raster_icon("save", 24)
         self.reset_icon = self.themed_raster_icon("reset", 24)
         self.search_icon = self.themed_raster_icon("search", 16)

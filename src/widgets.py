@@ -1683,6 +1683,11 @@ class RemoteTrackCard(QFrame):
         if event.button() == Qt.MouseButton.LeftButton and self.playback_seek_dragging:
             fraction = self.preview_playback_seek(event.position().x())
             self.playback_seek_dragging = False
+            # The dot is a temporary seek preview, not a second playback
+            # position indicator. Keeping its release coordinate visible makes
+            # the live progress line move through a stale, stationary handle.
+            self.playback_hover_position = None
+            self.update()
             self.playback_seek_requested.emit(self.track_index, fraction)
             event.accept()
             return

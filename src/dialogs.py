@@ -61,15 +61,31 @@ class SettingsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Настройки")
-        self.resize(700, 600)
-        self.setMinimumWidth(700)
+        self.resize(700, 620)
+        self.setMinimumSize(520, 360)
         theme_ids = {theme["id"] for theme in available_themes()}
         self.theme_mode = theme_mode if theme_mode in theme_ids else "dark"
         self.youtube_cookies_file_path = youtube_cookies_file.strip()
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(18, 18, 18, 18)
-        root.setSpacing(16)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(10)
+
+        self.settings_scroll = QScrollArea()
+        self.settings_scroll.setWidgetResizable(True)
+        self.settings_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.settings_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.settings_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.settings_content = QWidget()
+        settings_layout = QVBoxLayout(self.settings_content)
+        settings_layout.setContentsMargins(6, 6, 6, 6)
+        settings_layout.setSpacing(16)
+        self.settings_scroll.setWidget(self.settings_content)
+        root.addWidget(self.settings_scroll, 1)
 
         github_row = QHBoxLayout()
         github_row.addStretch(1)
@@ -82,7 +98,7 @@ class SettingsDialog(QDialog):
         self.update_button.setFixedHeight(30)
         github_row.addWidget(self.update_button)
         github_row.addStretch(1)
-        root.addLayout(github_row)
+        settings_layout.addLayout(github_row)
 
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
@@ -299,8 +315,8 @@ class SettingsDialog(QDialog):
         grid.addWidget(window_title, 7, 0)
         grid.addWidget(window_panel, 7, 1)
 
-        root.addLayout(grid)
-        root.addStretch(1)
+        settings_layout.addLayout(grid)
+        settings_layout.addStretch(1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)
@@ -397,6 +413,20 @@ class SettingsDialog(QDialog):
             "font-weight:600;"
             "}"
             f"QDialogButtonBox QPushButton:hover {{ background:{panel_hover}; }}"
+        )
+        self.settings_scroll.setStyleSheet(
+            "QScrollArea, QScrollArea > QWidget > QWidget {"
+            "background:transparent; border:none;"
+            "}"
+            "QScrollBar:vertical {"
+            "background:transparent; width:10px; margin:2px;"
+            "}"
+            "QScrollBar::handle:vertical {"
+            f"background:{panel_border}; border-radius:5px; min-height:28px;"
+            "}"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {"
+            "height:0; border:none;"
+            "}"
         )
 
         repository_button_style = (
