@@ -83,7 +83,7 @@ app = BUNDLE(
     icon='assets/icons/Compact.icns',
     bundle_identifier='app.compact.player',
     info_plist={
-        'CFBundleShortVersionString': '0.8.2',
-        'CFBundleVersion': '0.8.2',
+        'CFBundleShortVersionString': '0.8.4b',
+        'CFBundleVersion': '0.8.4.2',
     },
 )

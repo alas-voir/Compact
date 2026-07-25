@@ -4,7 +4,7 @@ Compact is a desktop music player and local library manager built with PyQt6.
 It combines music downloads and imports, library browsing, playback queue
 management, and MP3 metadata editing in a compact three-panel interface.
 
-Current version: **0.8.2**
+Current version: **0.8.4b**
 
 ## Features
 

@@ -8,7 +8,7 @@ export PYINSTALLER_CONFIG_DIR="$PWD/.pyinstaller"
 mkdir -p "$PYINSTALLER_CONFIG_DIR"
 
 APP_NAME="Compact"
-DMG_NAME="${APP_NAME}.dmg"
+DMG_NAME="Compact-v0.8.4b-macos.dmg"
 DMG_STAGING_DIR="$PWD/build/dmg"
 APP_BUNDLE_PATH="$PWD/dist/${APP_NAME}.app"
 DMG_PATH="$PWD/dist/${DMG_NAME}"

@@ -2,6 +2,8 @@ import io
 import logging
 import logging.handlers
 import os
+import platform
+import ssl
 import sys
 from pathlib import Path
 
@@ -110,13 +112,17 @@ def setup_app_logging() -> Path:
     logger.info("Logging initialized")
     logger.info("Log file: %s", log_path)
     logger.info(
-        "Runtime | frozen=%s | executable=%s | cwd=%s | pid=%s | python=%s | platform=%s",
+        "Runtime | frozen=%s | executable=%s | cwd=%s | pid=%s | python=%s | "
+        "platform=%s | os_release=%s | machine=%s | ssl=%s",
         getattr(sys, "frozen", False),
         sys.executable,
         os.getcwd(),
         os.getpid(),
         sys.version.replace("\n", " "),
         sys.platform,
+        platform.release(),
+        platform.machine(),
+        ssl.OPENSSL_VERSION,
     )
     _LOGGER_INITIALIZED = True
     return log_path

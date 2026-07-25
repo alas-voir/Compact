@@ -162,7 +162,7 @@ from .youtube_urls import normalize_youtube_track_url
 
 
 class MainWindow(QMainWindow):
-    PROJECT_VERSION = "0.8.2"
+    PROJECT_VERSION = "0.8.4b"
     PROJECT_GITHUB_URL = "https://github.com/alas-voir/Compact"
 
     def __init__(self) -> None:
@@ -221,7 +221,9 @@ class MainWindow(QMainWindow):
         self.youtube_cookies_browser = youtube_auth.get("cookies_browser", "")
         self.youtube_cookies_file = youtube_auth.get("cookies_file", "")
         self.logger.info(
-            "MainWindow init | theme=%s | cookies_browser=%s | cookies_file_set=%s | log_path=%s",
+            "MainWindow init | version=%s | theme=%s | cookies_browser=%s | "
+            "cookies_file_set=%s | log_path=%s",
+            self.PROJECT_VERSION,
             self.theme_mode,
             self.youtube_cookies_browser or "<none>",
             bool(self.youtube_cookies_file),
@@ -1289,6 +1291,22 @@ class MainWindow(QMainWindow):
         }:
             QTimer.singleShot(0, self.position_macos_window_buttons)
         super().changeEvent(event)
+
+    def event(self, event) -> bool:
+        if (
+            sys.platform == "darwin"
+            and event.type() == QEvent.Type.NonClientAreaMouseButtonDblClick
+        ):
+            # Qt and AppKit can disagree about the maximized state when a
+            # customized native titlebar handles the double-click.  Own the
+            # toggle so the second double-click always restores the window.
+            if self.isMaximized():
+                self.showNormal()
+            else:
+                self.showMaximized()
+            event.accept()
+            return True
+        return super().event(event)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -9369,12 +9387,12 @@ class MainWindow(QMainWindow):
         self.monitor_icon = QIcon(self.themed_icon_path("monitor"))
         self.headphones_icon = QIcon(self.themed_icon_path("headphones"))
         self.status_icons = {
-            STATUS_PENDING: QIcon(self.themed_icon_path("to_download")),
-            STATUS_META_LOADING: QIcon(self.themed_icon_path("downloading")),
-            STATUS_DOWNLOADING: QIcon(self.themed_icon_path("downloading")),
-            STATUS_DONE: QIcon(self.themed_icon_path("downloaded")),
-            STATUS_ERROR: QIcon(self.themed_icon_path("to_download")),
-            STATUS_SKIPPED: QIcon(self.themed_icon_path("to_download")),
+            STATUS_PENDING: self.themed_raster_icon("to_download", 16),
+            STATUS_META_LOADING: self.themed_raster_icon("downloading", 16),
+            STATUS_DOWNLOADING: self.themed_raster_icon("downloading", 16),
+            STATUS_DONE: self.themed_raster_icon("downloaded", 16),
+            STATUS_ERROR: self.themed_raster_icon("to_download", 16),
+            STATUS_SKIPPED: self.themed_raster_icon("to_download", 16),
         }
         self.playlist_loading_icon = self.status_icons[STATUS_META_LOADING]
         self.playlist_ready_icon = self.status_icons[STATUS_PENDING]

@@ -3,8 +3,10 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yt_dlp
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -110,6 +112,12 @@ def build_app_ytdlp_options(**overrides) -> dict:
         "ignoreconfig": True,
         "quiet": True,
         "no_warnings": True,
+        # YouTube media hosts can take longer to answer than the yt-dlp
+        # default on slower routes.  Metadata requests are small, while an
+        # audio download must be allowed to reconnect and continue.
+        "socket_timeout": 60,
+        "retries": 5,
+        "fragment_retries": 5,
     }
     javascript_runtime = resolve_javascript_runtime()
     if javascript_runtime:
@@ -162,6 +170,30 @@ def sanitize_ytdlp_options(options: dict) -> dict:
         else:
             sanitized[key] = value
     return sanitized
+
+
+def download_event_diagnostics(event: dict) -> dict[str, object]:
+    """Return useful progress details without leaking signed media URLs."""
+    info = event.get("info_dict") or {}
+    media_url = str(info.get("url") or event.get("url") or "")
+    try:
+        media_host = urlsplit(media_url).hostname or ""
+    except ValueError:
+        media_host = ""
+    return {
+        "status": str(event.get("status") or ""),
+        "format_id": str(info.get("format_id") or ""),
+        "protocol": str(info.get("protocol") or ""),
+        "ext": str(info.get("ext") or ""),
+        "media_host": media_host,
+        "downloaded_bytes": int(event.get("downloaded_bytes") or 0),
+        "total_bytes": int(
+            event.get("total_bytes") or event.get("total_bytes_estimate") or 0
+        ),
+        "speed": int(event.get("speed") or 0),
+        "fragment_index": int(event.get("fragment_index") or 0),
+        "fragment_count": int(event.get("fragment_count") or 0),
+    }
 
 
 class MetadataWorker(QObject):
@@ -520,6 +552,10 @@ class DownloadWorker(QObject):
         self.ytdlp_options = dict(ytdlp_options or {})
         self._cancel_requested = False
         self._was_cancelled = False
+        self._attempt_number = 0
+        self._attempt_started_at = 0.0
+        self._first_progress_logged = False
+        self._last_download_diagnostics: dict[str, object] = {}
 
     def cancel(self) -> None:
         self._cancel_requested = True
@@ -532,10 +568,28 @@ class DownloadWorker(QObject):
             raise WorkerCancelledError("Загрузка отменена пользователем.")
         status = event.get("status")
         if status == "downloading":
+            diagnostics = download_event_diagnostics(event)
+            self._last_download_diagnostics = diagnostics
+            if not self._first_progress_logged:
+                logger.info(
+                    "DownloadWorker transfer started | index=%s | attempt=%s | "
+                    "format_id=%s | protocol=%s | ext=%s | media_host=%s | "
+                    "total_bytes=%s | fragments=%s",
+                    self.index,
+                    self._attempt_number,
+                    diagnostics["format_id"] or "<unknown>",
+                    diagnostics["protocol"] or "<unknown>",
+                    diagnostics["ext"] or "<unknown>",
+                    diagnostics["media_host"] or "<unknown>",
+                    diagnostics["total_bytes"] or "<unknown>",
+                    diagnostics["fragment_count"] or "<unknown>",
+                )
+                self._first_progress_logged = True
             percent = download_progress_percent(event)
             if percent is not None:
                 self.progress_changed.emit(self.index, percent)
         elif status == "finished":
+            self._last_download_diagnostics = download_event_diagnostics(event)
             self.progress_changed.emit(self.index, 100.0)
 
     def run(self) -> None:
@@ -590,9 +644,11 @@ class DownloadWorker(QObject):
         if ffmpeg_location:
             options["ffmpeg_location"] = ffmpeg_location
         logger.info(
-            "DownloadWorker started | index=%s | url=%s | ffmpeg_dir=%s | output_template=%s | options=%s",
+            "DownloadWorker started | index=%s | url=%s | yt_dlp=%s | "
+            "ffmpeg_dir=%s | output_template=%s | options=%s",
             self.index,
             normalized_url,
+            yt_dlp.version.__version__,
             ffmpeg_dir,
             output_template,
             sanitize_ytdlp_options(options),
@@ -638,12 +694,24 @@ class DownloadWorker(QObject):
         for attempt_index, variant in enumerate(variants, start=1):
             if self._cancel_requested:
                 raise WorkerCancelledError("Загрузка отменена пользователем.")
+            self._attempt_number = attempt_index
+            self._attempt_started_at = time.monotonic()
+            self._first_progress_logged = False
+            self._last_download_diagnostics = {}
             logger.info(
-                "DownloadWorker attempt | index=%s | attempt=%s/%s | options=%s",
+                "DownloadWorker attempt | index=%s | attempt=%s/%s | "
+                "format=%s | authenticated=%s | socket_timeout=%s | retries=%s",
                 self.index,
                 attempt_index,
                 len(variants),
-                sanitize_ytdlp_options(variant),
+                variant.get("format") or "<default>",
+                bool(
+                    variant.get("cookiesfrombrowser")
+                    or variant.get("cookiefile")
+                    or variant.get("cookies")
+                ),
+                variant.get("socket_timeout"),
+                variant.get("retries"),
             )
             try:
                 with yt_dlp.YoutubeDL(variant) as ydl:
@@ -660,10 +728,17 @@ class DownloadWorker(QObject):
             except DownloadError as exc:
                 last_error = exc
                 message = str(exc)
+                elapsed = time.monotonic() - self._attempt_started_at
                 logger.warning(
-                    "DownloadWorker attempt failed | index=%s | attempt=%s | error=%s",
+                    "DownloadWorker attempt failed | index=%s | attempt=%s | "
+                    "elapsed_seconds=%.1f | transfer_started=%s | "
+                    "last_progress=%s | error_type=%s | error=%s",
                     self.index,
                     attempt_index,
+                    elapsed,
+                    self._first_progress_logged,
+                    self._last_download_diagnostics or "<none>",
+                    type(exc).__name__,
                     message,
                 )
                 if "Requested format is not available" not in message:
