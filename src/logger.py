@@ -4,6 +4,7 @@ import logging.handlers
 import os
 import platform
 import ssl
+import subprocess
 import sys
 from pathlib import Path
 
@@ -11,6 +12,22 @@ from .paths import user_config_dir
 
 _LOGGER_INITIALIZED = False
 _LOG_FILE_PATH: Path | None = None
+
+
+def _mac_hardware_value(name: str) -> str:
+    if sys.platform != "darwin":
+        return ""
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/sysctl", "-n", name],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
 
 
 class _TeeStream(io.TextIOBase):
@@ -113,7 +130,8 @@ def setup_app_logging() -> Path:
     logger.info("Log file: %s", log_path)
     logger.info(
         "Runtime | frozen=%s | executable=%s | cwd=%s | pid=%s | python=%s | "
-        "platform=%s | os_release=%s | machine=%s | ssl=%s",
+        "platform=%s | os_release=%s | machine=%s | ssl=%s | "
+        "mac_model=%s | cpu=%s | memory_bytes=%s",
         getattr(sys, "frozen", False),
         sys.executable,
         os.getcwd(),
@@ -123,6 +141,9 @@ def setup_app_logging() -> Path:
         platform.release(),
         platform.machine(),
         ssl.OPENSSL_VERSION,
+        _mac_hardware_value("hw.model") or "<unknown>",
+        _mac_hardware_value("machdep.cpu.brand_string") or "<unknown>",
+        _mac_hardware_value("hw.memsize") or "<unknown>",
     )
     _LOGGER_INITIALIZED = True
     return log_path

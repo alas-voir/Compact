@@ -20,9 +20,10 @@ class YtDlpRuntimeTests(unittest.TestCase):
 
         self.assertEqual(options["js_runtimes"], {"deno": {"path": runtime_path}})
         self.assertTrue(options["skip_download"])
-        self.assertEqual(options["socket_timeout"], 60)
-        self.assertEqual(options["retries"], 5)
-        self.assertEqual(options["fragment_retries"], 5)
+        self.assertEqual(options["socket_timeout"], 20)
+        self.assertEqual(options["retries"], 2)
+        self.assertEqual(options["fragment_retries"], 2)
+        self.assertEqual(options["http_chunk_size"], 10 * 1024 * 1024)
 
     def test_runtime_network_defaults_can_be_overridden(self) -> None:
         with patch("src.workers.resolve_javascript_runtime", return_value=None):
@@ -30,7 +31,7 @@ class YtDlpRuntimeTests(unittest.TestCase):
 
         self.assertEqual(options["socket_timeout"], 15)
         self.assertEqual(options["retries"], 1)
-        self.assertEqual(options["fragment_retries"], 5)
+        self.assertEqual(options["fragment_retries"], 2)
 
     def test_byte_progress(self) -> None:
         self.assertEqual(

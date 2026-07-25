@@ -63,7 +63,9 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
-    target_arch=None,
+    # Compact bundles native Apple Silicon tools.  Pin the executable to
+    # arm64 so an accidental Intel Python cannot produce a mixed bundle.
+    target_arch='arm64',
     codesign_identity=None,
     entitlements_file=None,
     icon=['assets/icons/Compact.icns'],

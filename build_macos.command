@@ -13,11 +13,24 @@ DMG_STAGING_DIR="$PWD/build/dmg"
 APP_BUNDLE_PATH="$PWD/dist/${APP_NAME}.app"
 DMG_PATH="$PWD/dist/${DMG_NAME}"
 
+require_arm64() {
+  local binary_path="$1"
+  if [[ ! -f "$binary_path" ]] || ! /usr/bin/file "$binary_path" | /usr/bin/grep -q "arm64"; then
+    echo "ARM64 binary required: $binary_path" >&2
+    exit 1
+  fi
+}
+
+require_arm64 "bin/ffmpeg"
+require_arm64 "bin/ffprobe"
+require_arm64 "bin/deno"
+
 if [[ -x ".vnv/bin/python" ]]; then
   PYTHON_BIN=".vnv/bin/python"
 else
   PYTHON_BIN="python3"
 fi
+require_arm64 "$PYTHON_BIN"
 
 "$PYTHON_BIN" -m pip install -r requirements.txt pyinstaller
 /bin/rm -rf -- build dist
@@ -26,6 +39,8 @@ fi
   --clean \
   --noconfirm \
   Compact.spec
+
+require_arm64 "$APP_BUNDLE_PATH/Contents/MacOS/$APP_NAME"
 
 mkdir -p "$DMG_STAGING_DIR"
 /bin/rm -rf -- "$DMG_STAGING_DIR"

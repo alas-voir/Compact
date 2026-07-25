@@ -115,9 +115,15 @@ def build_app_ytdlp_options(**overrides) -> dict:
         # YouTube media hosts can take longer to answer than the yt-dlp
         # default on slower routes.  Metadata requests are small, while an
         # audio download must be allowed to reconnect and continue.
-        "socket_timeout": 60,
-        "retries": 5,
-        "fragment_retries": 5,
+        # Keep a failed CDN route bounded.  A 60-second timeout with five
+        # retries made an unreachable googlevideo host look like a frozen UI
+        # for roughly six minutes.
+        "socket_timeout": 20,
+        "retries": 2,
+        "fragment_retries": 2,
+        # Smaller HTTP ranges give yt-dlp a chance to reconnect instead of
+        # holding one long-lived media request indefinitely.
+        "http_chunk_size": 10 * 1024 * 1024,
     }
     javascript_runtime = resolve_javascript_runtime()
     if javascript_runtime:

@@ -100,6 +100,7 @@ from .music_paths import (
     ensure_unique_music_file_path,
 )
 from .now_playing import MacOSNowPlaying
+from .network import ConnectivityCheckWorker
 from .paths import resource_path
 from .playlist_storage import (
     delete_playlist,
@@ -330,6 +331,8 @@ class MainWindow(QMainWindow):
         self.youtube_worker: YouTubePlaylistWorker | None = None
         self.youtube_download_thread: QThread | None = None
         self.youtube_download_worker: YouTubePlaylistDownloadWorker | None = None
+        self.connectivity_check_thread: QThread | None = None
+        self.connectivity_check_worker: ConnectivityCheckWorker | None = None
         self.pending_playlist_index: int | None = None
         self.active_remote_playlist_index: int | None = None
         self.active_youtube_download_queue: list[int] = []
@@ -696,6 +699,11 @@ class MainWindow(QMainWindow):
 
         self.experimental_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.experimental_splitter.setChildrenCollapsible(False)
+        # macOS styles can expose only a one-pixel splitter hit target.  Keep
+        # the separator visually subtle while giving mouse and trackpad users
+        # a comfortably sized draggable area.
+        self.experimental_splitter.setHandleWidth(14)
+        self.experimental_splitter.setOpaqueResize(True)
 
         self.library_view_button = QPushButton()
         self.library_view_button.setProperty("icon_header_button", True)
@@ -1226,6 +1234,13 @@ class MainWindow(QMainWindow):
         self.experimental_splitter.addWidget(self.playlists_panel)
         self.experimental_splitter.addWidget(self.tracks_panel)
         self.experimental_splitter.addWidget(self.right_panel_stack)
+        for handle_index in range(1, self.experimental_splitter.count()):
+            splitter_handle = self.experimental_splitter.handle(handle_index)
+            splitter_handle.setCursor(Qt.CursorShape.SplitHCursor)
+            splitter_handle.setToolTip("Потяните, чтобы изменить ширину разделов")
+            splitter_handle.setAccessibleName(
+                "Изменение ширины разделов"
+            )
         self.experimental_splitter.setSizes([220, 620, 280])
         self.experimental_splitter.splitterMoved.connect(
             lambda *_: self.sync_footer_sections()
@@ -1265,6 +1280,54 @@ class MainWindow(QMainWindow):
         self.animation_timer.timeout.connect(self.animate_active_card)
         self.animation_timer.start()
         QTimer.singleShot(0, self.ensure_ffmpeg_available)
+        QTimer.singleShot(750, self.start_connectivity_check)
+
+    def start_connectivity_check(self) -> None:
+        if self.connectivity_check_thread is not None:
+            return
+        thread = QThread(self)
+        worker = ConnectivityCheckWorker()
+        self.connectivity_check_thread = thread
+        self.connectivity_check_worker = worker
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self.on_connectivity_check_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self.on_connectivity_check_thread_finished)
+        thread.start()
+
+    def on_connectivity_check_finished(self, results: list[dict]) -> None:
+        unavailable = [result for result in results if not result["available"]]
+        for result in results:
+            self.logger.info(
+                "Connectivity check | domain=%s | purpose=%s | available=%s | "
+                "status=%s | elapsed_seconds=%.2f | error=%s",
+                result["domain"],
+                result["purpose"],
+                result["available"],
+                result["status"],
+                result["elapsed_seconds"],
+                result["error"] or "<none>",
+            )
+        if not unavailable:
+            return
+        details = "\n".join(
+            f"• {result['domain']} — {result['purpose']}: {result['error']}"
+            for result in unavailable
+        )
+        QMessageBox.warning(
+            self,
+            "Ограниченный доступ к сети",
+            "Некоторые серверы, необходимые для работы Compact, недоступны:\n\n"
+            f"{details}\n\n"
+            "Проверьте подключение, VPN, прокси, DNS или настройки провайдера.",
+        )
+
+    def on_connectivity_check_thread_finished(self) -> None:
+        self.connectivity_check_thread = None
+        self.connectivity_check_worker = None
 
     def changeEvent(self, event) -> None:
         if (
