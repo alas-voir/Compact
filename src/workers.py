@@ -134,6 +134,31 @@ def build_app_ytdlp_options(**overrides) -> dict:
     return options
 
 
+def is_retryable_download_error(message: str) -> bool:
+    """Return whether another yt-dlp option variant may recover the download."""
+    normalized = message.casefold()
+    retryable_markers = (
+        "requested format is not available",
+        "read timed out",
+        "connect timeout",
+        "connection timed out",
+        "connection reset",
+        "connection aborted",
+        "remote end closed connection",
+        "temporary failure in name resolution",
+        "name or service not known",
+        "network is unreachable",
+        "no route to host",
+        "http error 403",
+        "http error 429",
+        "http error 500",
+        "http error 502",
+        "http error 503",
+        "http error 504",
+    )
+    return any(marker in normalized for marker in retryable_markers)
+
+
 def download_progress_percent(event: dict) -> float | None:
     total_bytes = event.get("total_bytes") or event.get("total_bytes_estimate")
     downloaded_bytes = event.get("downloaded_bytes", 0)
@@ -747,8 +772,27 @@ class DownloadWorker(QObject):
                     type(exc).__name__,
                     message,
                 )
-                if "Requested format is not available" not in message:
+                if not is_retryable_download_error(message):
                     raise
+                if attempt_index < len(variants):
+                    # yt-dlp already exhausted the normal retry budget for the
+                    # first route. Keep alternate format/auth attempts bounded:
+                    # their purpose is to obtain a different media URL, not to
+                    # wait on the same unreachable CDN host repeatedly.
+                    next_variant = variants[attempt_index]
+                    next_variant["socket_timeout"] = min(
+                        int(next_variant.get("socket_timeout") or 20),
+                        15,
+                    )
+                    next_variant["retries"] = 0
+                    next_variant["fragment_retries"] = 0
+                    logger.info(
+                        "DownloadWorker retrying with fallback variant | "
+                        "index=%s | next_attempt=%s/%s",
+                        self.index,
+                        attempt_index + 1,
+                        len(variants),
+                    )
             except Exception as exc:
                 last_error = exc
                 logger.warning(

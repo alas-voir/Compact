@@ -1312,6 +1312,11 @@ class MainWindow(QMainWindow):
                 result["error"] or "<none>",
             )
         if not unavailable:
+            self.show_toast(
+                "Проверка сети завершена успешно\n"
+                "Все необходимые домены доступны",
+                success=True,
+            )
             return
         details = "\n".join(
             f"• {result['domain']} — {result['purpose']}: {result['error']}"
@@ -1620,6 +1625,17 @@ class MainWindow(QMainWindow):
                             self.configure_macos_dialog_window(dialog)
                         ),
                     )
+        if event.type() in {
+            QEvent.Type.ApplicationActivate,
+            QEvent.Type.ApplicationStateChange,
+        }:
+            QTimer.singleShot(0, self.restore_minimized_dialogs)
+        elif (
+            watched is self
+            and event.type() == QEvent.Type.WindowStateChange
+            and not self.isMinimized()
+        ):
+            QTimer.singleShot(0, self.restore_minimized_dialogs)
         if (
             hasattr(self, "playlist_list")
             and watched is self.playlist_list.viewport()
@@ -1713,6 +1729,22 @@ class MainWindow(QMainWindow):
                 self.clear_track_search_focus()
                 return True
         return super().eventFilter(watched, event)
+
+    def restore_minimized_dialogs(self) -> None:
+        """Bring back modal dialogs that macOS leaves inaccessible after minimising."""
+        minimized_dialogs = [
+            widget
+            for widget in QApplication.topLevelWidgets()
+            if (
+                isinstance(widget, QDialog)
+                and widget.isMinimized()
+                and widget.isModal()
+            )
+        ]
+        for dialog in minimized_dialogs:
+            dialog.showNormal()
+            dialog.raise_()
+            dialog.activateWindow()
 
     def should_start_window_drag(self, watched, event) -> bool:
         if not isinstance(watched, QWidget) or watched.window() is not self:
@@ -1810,6 +1842,8 @@ class MainWindow(QMainWindow):
             native_window.setTitlebarAppearsTransparent_(False)
             native_window.setTitleVisibility_(NSWindowTitleVisible)
             native_window.setMovableByWindowBackground_(False)
+            if native_window.respondsToSelector_("setExcludedFromWindowsMenu:"):
+                native_window.setExcludedFromWindowsMenu_(False)
             if native_window.respondsToSelector_("setTitlebarSeparatorStyle:"):
                 native_window.setTitlebarSeparatorStyle_(0)
             for button_type in (

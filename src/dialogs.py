@@ -557,14 +557,6 @@ class MetadataDialog(QDialog):
         self.pick_cover_button.setToolTip("Выбрать обложку")
         self.pick_cover_button.setAccessibleName("Выбрать обложку")
         self.pick_cover_button.setFixedSize(42, 42)
-        self.pick_cover_button.setStyleSheet(
-            "QToolButton {"
-            "background:#32363d;"
-            "border:1px solid #555555;"
-            "border-radius:10px;"
-            "}"
-            "QToolButton:hover { background:#3b414b; }"
-        )
         self.pick_cover_button.setIcon(pick_cover_icon)
         self.pick_cover_button.setIconSize(QSize(20, 20))
         self.pick_cover_button.clicked.connect(self.pick_cover)
@@ -573,14 +565,6 @@ class MetadataDialog(QDialog):
         self.clear_cover_button.setToolTip("Сбросить обложку")
         self.clear_cover_button.setAccessibleName("Сбросить обложку")
         self.clear_cover_button.setFixedSize(42, 42)
-        self.clear_cover_button.setStyleSheet(
-            "QToolButton {"
-            "background:#32363d;"
-            "border:1px solid #555555;"
-            "border-radius:10px;"
-            "}"
-            "QToolButton:hover { background:#3b414b; }"
-        )
         self.clear_cover_button.setIcon(clear_cover_icon)
         self.clear_cover_button.setIconSize(QSize(20, 20))
         self.clear_cover_button.clicked.connect(self.clear_cover)

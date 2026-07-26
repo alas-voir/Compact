@@ -6,6 +6,7 @@ from src.workers import (
     build_app_ytdlp_options,
     download_event_diagnostics,
     download_progress_percent,
+    is_retryable_download_error,
 )
 
 
@@ -32,6 +33,19 @@ class YtDlpRuntimeTests(unittest.TestCase):
         self.assertEqual(options["socket_timeout"], 15)
         self.assertEqual(options["retries"], 1)
         self.assertEqual(options["fragment_retries"], 2)
+
+    def test_network_timeouts_are_retryable_by_download_fallback(self) -> None:
+        self.assertTrue(
+            is_retryable_download_error(
+                "ERROR: HTTPSConnectionPool: Read timed out. Giving up after 2 retries"
+            )
+        )
+        self.assertTrue(is_retryable_download_error("ERROR: HTTP Error 403: Forbidden"))
+
+    def test_permanent_download_errors_are_not_retried(self) -> None:
+        self.assertFalse(
+            is_retryable_download_error("ERROR: Video unavailable: removed by uploader")
+        )
 
     def test_byte_progress(self) -> None:
         self.assertEqual(
